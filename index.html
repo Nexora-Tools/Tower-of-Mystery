@@ -203,7 +203,7 @@
   </div>
 
   <div id="storage-banner" class="banner banner-warn hidden">
-    ℹ️ Multiplayer চালাতে সবাইকে একই Room Code দিয়ে এই পেজটি খোলা রাখতে হবে।
+    ⚠️ মাল্টিপ্লেয়ার শুধু Claude অ্যাপের ভেতরে (আর্টিফ্যাক্ট হিসেবে খোলা হলে) কাজ করে — এই মুহূর্তে সেটা পাওয়া যাচ্ছে না, তাই শুধু <b>একা খেলুন (Solo)</b> মোড চালু আছে।
   </div>
 
   <!-- HOME -->
@@ -306,12 +306,17 @@
 
 </div>
 
-<script src="https://unpkg.com/peerjs@1.5.4/dist/peerjs.min.js"></script>
 <script>
 (function(){
   "use strict";
 
   /* ================= CONFIG ================= */
+  // GitHub Pages + Firebase Realtime Database backend
+  // The database is configured in Firebase Console. This URL is the database
+  // shown in the user's Firebase project. Test-mode rules currently allow
+  // unauthenticated read/write for development.
+  const FIREBASE_DB_URL = 'https://mystery-of-tower-b26ff-default-rtdb.firebaseio.com';
+  const STORAGE_OK = true;
   const QUESTION_MS = 22000, REVEAL_MS = 5500;
 
   const MODES = [
@@ -370,7 +375,7 @@
     err_name:"অনুগ্রহ করে তোমার নাম লিখো।",
     err_code:"অনুগ্রহ করে ৪ অক্ষরের রুম কোড দাও।",
     err_notfound:"এই কোডে কোনো রুম পাওয়া যায়নি। কোডটি আবার দেখো, অথবা হোস্টকে জিজ্ঞেস করো রুম এখনো খোলা আছে কিনা।",
-    err_create_failed:"রুম তৈরি করা যায়নি (স্টোরেজ সমস্যা)। আবার চেষ্টা করো, অথবা Solo মোডে খেলো।",
+    err_create_failed:"রুম তৈরি করা যায়নি। Firebase সংযোগ ও Database Rules পরীক্ষা করো।",
     answered_you:"✓ উত্তর লক করা হয়েছে। ",
     waiting_others:(n,t)=>`অন্যদের অপেক্ষায়… (${n}/${t} জন উত্তর দিয়েছে)`,
     host_tag:"হোস্ট", pts:"পয়েন্ট", copied:"কপি হয়েছে!"
@@ -390,6 +395,31 @@
   const storageKey = code => `towerroom_v2_${code}`;
   const modeCfg = id => MODES.find(m=>m.id===id);
   const escapeHtml = s => (s||'').replace(/[&<>"']/g, c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+
+  // Firebase is the multiplayer backend on GitHub Pages, so the old
+  // Claude-only window.storage warning is intentionally disabled.
+  $('storage-banner').classList.add('hidden');
+
+  function roomUrl(code){
+    return FIREBASE_DB_URL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(code) + '.json';
+  }
+  async function firebaseFetch(url, options={}){
+    const controller = new AbortController();
+    const timeout = setTimeout(()=>controller.abort(), 9000);
+    try{
+      const response = await fetch(url, { ...options, signal:controller.signal,
+        headers:{'Content-Type':'application/json', ...(options.headers||{})} });
+      const text = await response.text();
+      let data = null;
+      try{ data = text ? JSON.parse(text) : null; }catch(_){}
+      if(!response.ok) throw new Error('Firebase HTTP '+response.status+(data?.error?': '+data.error:''));
+      return data;
+    } finally { clearTimeout(timeout); }
+  }
+
+  // Quick startup check. It does not create any database data.
+  firebaseFetch(FIREBASE_DB_URL.replace(/\/$/,'') + '/.json', {method:'GET'})
+    .catch(e=>console.warn('Firebase startup check failed:', e));
 
   /* ================= question generation ================= */
   function normQ(s){ return (s||'').trim().toLowerCase().replace(/\s+/g,' '); }
@@ -453,7 +483,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
 
   $('btn-home').onclick = ()=>{ hardReset(); };
   function hardReset(){
-    stopPolling(); destroyPeer(); room=null; roomCode=null; isHost=false; playerId=null; soloMode=false; soloState=null;
+    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; soloMode=false; soloState=null;
     selectedMode=null; selectedCount=null; lobbySelectedMode=null; lobbySelectedCount=null;
     $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
     showScreen('screen-home');
@@ -566,8 +596,8 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
   $('btn-stop').onclick = async ()=>{
     if(soloMode){ soloState.stop=true; showSoloEnd(); }
     else if(room){
-      if(isHost){ room.stopRequested=true; broadcastState(); render(); }
-      else { const c=[...peerConnections.values()][0]; sendConn(c,{type:'stop'}); }
+      const fresh = await loadRoom(roomCode);
+      if(fresh){ fresh.stopRequested = true; await saveRoom(fresh); room=fresh; }
     }
   };
 
@@ -620,281 +650,204 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     launchConfetti();
   }
 
-  /* ================= MULTIPLAYER: PeerJS layer ================= */
-  // GitHub Pages cannot use Claude's window.storage. PeerJS provides the
-  // browser-to-browser connection needed for multiplayer without a server
-  // of our own. The host is the authority for room/game state.
-  const PEER_PREFIX = 'tower-';
-  let peer=null;
-  let peerConnections=new Map();
-  let authorityTimer=null;
-
-  function hostPeerId(code){ return PEER_PREFIX + code; }
-
-  function sendConn(conn, message){
-    try{ if(conn && conn.open) conn.send(message); }catch(e){ console.error(e); }
+  /* ================= MULTIPLAYER: Firebase layer ================= */
+  async function saveRoom(r){
+    r.updatedAt=Date.now();
+    try{
+      await firebaseFetch(roomUrl(r.code), {method:'PUT', body:JSON.stringify(r)});
+      return true;
+    }catch(e){
+      console.error('Firebase save failed:', e);
+      $('home-error').textContent = 'Firebase সংযোগ হচ্ছে না। ইন্টারনেট ও Database Rules পরীক্ষা করো।';
+      return false;
+    }
   }
-
-  function broadcast(message){
-    peerConnections.forEach(conn=>sendConn(conn,message));
+  async function loadRoom(code){
+    try{
+      return await firebaseFetch(roomUrl(code), {method:'GET'});
+    }catch(e){
+      console.error('Firebase load failed:', e);
+      return null;
+    }
   }
-
-  function broadcastState(){
-    if(isHost && room) broadcast({type:'state', room});
-  }
-
-  function setupConnection(conn){
-    peerConnections.set(conn.peer, conn);
-    conn.on('data', async msg=>{
-      if(!msg || typeof msg.type!=='string') return;
-      if(!isHost && msg.type==='state' && msg.room){
-        room=msg.room;
-        lobbySelectedMode=room.mode||lobbySelectedMode;
-        lobbySelectedCount=room.total||lobbySelectedCount;
-        localAnsweredThisRound = !!(room.players[playerId] && room.players[playerId].answered);
-        render();
-        return;
-      }
-      if(!isHost) return;
-      if(msg.type==='join' && msg.player){
-        const p=msg.player;
-        conn.__playerId=p.id;
-        room.players[p.id]={name:p.name,score:0,health:100,answered:false,choice:null,ageTotal:0,ageCount:0,loveTotal:0,loveCount:0};
-        sendConn(conn,{type:'state',room});
-        broadcastState(); render();
-      }else if(msg.type==='answer'){
-        const pid=String(msg.playerId||'');
-        if(room && room.phase==='question' && room.players[pid] && !room.players[pid].answered){
-          room.players[pid].answered=true;
-          room.players[pid].choice=Number.isInteger(msg.idx)?msg.idx:-1;
-          broadcastState(); render();
-        }
-      }else if(msg.type==='setMode' && room.phase==='lobby'){
-        if(MODES.some(m=>m.id===msg.mode)) room.mode=msg.mode;
-        broadcastState(); render();
-      }else if(msg.type==='setCount' && room.phase==='lobby'){
-        if([10,20,30,'inf'].includes(msg.total)) room.total=msg.total;
-        broadcastState(); render();
-      }else if(msg.type==='start' && room.phase==='lobby'){
-        await hostStartGame();
-      }else if(msg.type==='stop'){
-        room.stopRequested=true; broadcastState(); render();
-      }else if(msg.type==='restart'){
-        await hostRestartGame();
-      }
-    });
-    conn.on('close',()=>{
-      peerConnections.delete(conn.peer);
-      if(isHost && room){
-        const pid=conn.__playerId;
-        if(pid && pid!==room.hostId) delete room.players[pid];
-        broadcastState(); render();
-      }
-    });
-    conn.on('error',e=>console.error('Peer connection error',e));
-  }
-
-  function setupPeerEvents(){
-    peer.on('error',e=>{
-      console.error('PeerJS error',e);
-      const code=e && e.type==='peer-unavailable' ? TXT.err_notfound : 'মাল্টিপ্লেয়ার সংযোগ করা যায়নি। আবার চেষ্টা করো।';
-      $('home-error').textContent=code;
-      if(!isHost) showScreen('screen-home');
-    });
-  }
-
-  function createPeerForHost(){
-    return new Promise((resolve,reject)=>{
-      peer = new Peer(hostPeerId(roomCode));
-      setupPeerEvents();
-      peer.once('open',()=>resolve());
-      peer.once('error',reject);
-      peer.on('connection',conn=>{
-        setupConnection(conn);
-        conn.once('open',()=>{
-          // The join message contains the player's id/name.
-        });
-      });
-    });
-  }
-
-  function connectToHost(){
-    return new Promise((resolve,reject)=>{
-      peer = new Peer();
-      setupPeerEvents();
-      peer.once('open',()=>{
-        const conn=peer.connect(hostPeerId(roomCode),{reliable:true});
-        setupConnection(conn);
-        conn.once('open',()=>{
-          conn.__playerId=playerId;
-          sendConn(conn,{type:'join',player:{id:playerId,name:playerName}});
-          resolve(conn);
-        });
-        conn.once('error',reject);
-      });
-      peer.once('error',reject);
-    });
-  }
-
-  function destroyPeer(){
-    peerConnections.forEach(c=>{try{c.close();}catch(e){}});
-    peerConnections.clear();
-    if(peer){ try{peer.destroy();}catch(e){} peer=null; }
-  }
-
-  async function hostStartGame(){
-    if(!isHost || !room || !room.mode || !room.total) return;
-    showScreen('screen-loading');
-    const q=await apiGenerateQuestion(room.mode,room.usedQuestions||[]);
-    room.usedQuestions=(room.usedQuestions||[]).concat([q.question]);
-    room.currentQuestion=q; room.phase='question'; room.phaseStartedAt=Date.now(); room.round=0; room.stopRequested=false;
-    Object.values(room.players).forEach(p=>{p.answered=false;p.choice=null;});
-    broadcastState(); render();
-  }
-
-  async function hostNextQuestion(){
-    if(!isHost || !room) return;
-    room.phase='loading';
-    broadcastState(); render();
-    const q=await apiGenerateQuestion(room.mode,room.usedQuestions||[]);
-    room.usedQuestions=(room.usedQuestions||[]).concat([q.question]);
-    room.currentQuestion=q; room.round+=1; room.phase='question'; room.phaseStartedAt=Date.now();
-    Object.values(room.players).forEach(p=>{p.answered=false;p.choice=null;});
-    broadcastState(); render();
-  }
-
-  async function hostRestartGame(){
-    if(!isHost || !room) return;
-    room.phase='lobby'; room.round=0; room.mode=null; room.total=null; room.usedQuestions=[]; room.stopRequested=false; room.currentQuestion=null;
-    Object.values(room.players).forEach(p=>{p.score=0;p.health=100;p.answered=false;p.choice=null;p.ageTotal=0;p.ageCount=0;p.loveTotal=0;p.loveCount=0;});
-    lobbySelectedMode=null; lobbySelectedCount=null;
-    broadcastState(); render();
+  async function patchRoom(path, value){
+    try{
+      await firebaseFetch(FIREBASE_DB_URL.replace(/\/$/,'') + '/' + path.replace(/^\//,'') + '.json', {method:'PUT', body:JSON.stringify(value)});
+      return true;
+    }catch(e){
+      console.error('Firebase patch failed:', e);
+      return false;
+    }
   }
 
   $('btn-create').onclick = async ()=>{
-    const name=$('input-name').value.trim();
-    if(!name){$('home-error').textContent=TXT.err_name;return;}
+    if(!STORAGE_OK) return;
+    const name = $('input-name').value.trim();
+    if(!name){ $('home-error').textContent = TXT.err_name; return; }
     $('home-error').textContent='';
-    playerId=genId(); playerName=name; isHost=true; roomCode=genCode();
-    room={code:roomCode,hostId:playerId,phase:'lobby',mode:null,total:null,round:0,
-      players:{[playerId]:{name,score:0,health:100,answered:false,choice:null,ageTotal:0,ageCount:0,loveTotal:0,loveCount:0}},
-      usedQuestions:[],stopRequested:false,currentQuestion:null};
-    try{
-      showScreen('screen-loading');
-      await createPeerForHost();
-      lobbySelectedMode=null; lobbySelectedCount=null;
-      startPolling(); render();
-    }catch(e){
-      destroyPeer(); room=null; roomCode=null; isHost=false; playerId=null;
-      $('home-error').textContent='রুম তৈরি করা যায়নি। কিছুক্ষণ পরে আবার চেষ্টা করো।';
-      showScreen('screen-home');
-    }
+    playerId = genId(); playerName = name; isHost = true; roomCode = genCode();
+    room = { code:roomCode, hostId:playerId, phase:'lobby', mode:null, total:null, round:0,
+      players:{ [playerId]:{ name, score:0, health:100, answered:false, choice:null } }, usedQuestions:[], stopRequested:false };
+    const ok = await saveRoom(room);
+    const verify = ok ? await loadRoom(roomCode) : null;
+    if(!verify){ $('home-error').textContent = TXT.err_create_failed; room=null; roomCode=null; return; }
+    lobbySelectedMode=null; lobbySelectedCount=null;
+    startPolling(); render();
   };
 
   $('btn-join').onclick = async ()=>{
-    const name=$('input-name').value.trim();
-    const code=$('input-code').value.trim().toUpperCase();
-    if(!name){$('home-error').textContent=TXT.err_name;return;}
-    if(!code || code.length!==4){$('home-error').textContent=TXT.err_code;return;}
+    if(!STORAGE_OK) return;
+    const name = $('input-name').value.trim();
+    const code = $('input-code').value.trim().toUpperCase();
+    if(!name){ $('home-error').textContent = TXT.err_name; return; }
+    if(!code || code.length!==4){ $('home-error').textContent = TXT.err_code; return; }
     $('home-error').textContent='';
-    playerId=genId(); playerName=name; isHost=false; roomCode=code;
-    try{
-      showScreen('screen-loading');
-      const conn=await connectToHost();
-      conn.__playerId=playerId;
-      startPolling();
-      $('loading-line').textContent='রুমে যোগ দেওয়া হচ্ছে…';
-    }catch(e){
-      destroyPeer(); room=null; roomCode=null; playerId=null;
-      $('home-error').textContent=TXT.err_notfound;
-      showScreen('screen-home');
-    }
+    let found = await loadRoom(code);
+    if(!found){ await new Promise(r=>setTimeout(r,500)); found = await loadRoom(code); }
+    if(!found){ $('home-error').textContent = TXT.err_notfound; return; }
+    playerId = genId(); playerName = name; isHost=false; roomCode=code;
+    const newPlayer = { name, score:0, health:100, answered:false, choice:null };
+    const ok = await patchRoom('rooms/'+encodeURIComponent(code)+'/players/'+encodeURIComponent(playerId), newPlayer);
+    if(!ok){ $('home-error').textContent = 'রুমে যোগ দেওয়া যায়নি। Firebase Database Rules/Internet পরীক্ষা করো।'; return; }
+    found.players = found.players || {};
+    found.players[playerId] = newPlayer;
+    room = found;
+    startPolling(); render();
   };
 
-  $('input-code').addEventListener('input',e=>{e.target.value=e.target.value.toUpperCase();});
-  $('btn-copy').onclick=()=>{
+  $('input-code').addEventListener('input', e=>{ e.target.value = e.target.value.toUpperCase(); });
+  $('btn-copy').onclick = ()=>{
     if(navigator.clipboard && navigator.clipboard.writeText){
       navigator.clipboard.writeText(roomCode||'').then(()=>{
-        $('btn-copy').textContent=TXT.copied;setTimeout(()=>{$('btn-copy').textContent='কপি';},1400);
+        $('btn-copy').textContent = TXT.copied; setTimeout(()=>{ $('btn-copy').textContent='কপি'; },1400);
       }).catch(()=>{});
     }
   };
 
   function renderLobbyModeControls(){
-    const playerCount=Object.keys(room.players).length;
-    buildModeGrid($('lobby-mode-grid'),{selectedId:lobbySelectedMode||room.mode,playerCount,onSelect:async id=>{
-      lobbySelectedMode=id; room.mode=id; broadcastState(); render();
+    const playerCount = Object.keys(room.players).length;
+    buildModeGrid($('lobby-mode-grid'), { selectedId: lobbySelectedMode, playerCount, onSelect: async (id)=>{
+      lobbySelectedMode = id;
+      const fresh = await loadRoom(roomCode); if(fresh){ fresh.mode=id; await saveRoom(fresh); room=fresh; }
+      render();
     }});
-    buildCountRow($('lobby-count-row'),{selectedVal:lobbySelectedCount||room.total,onSelect:async v=>{
-      lobbySelectedCount=v; room.total=v; broadcastState(); render();
+    buildCountRow($('lobby-count-row'), { selectedVal: lobbySelectedCount, onSelect: async (v)=>{
+      lobbySelectedCount = v;
+      const fresh = await loadRoom(roomCode); if(fresh){ fresh.total=v; await saveRoom(fresh); room=fresh; }
+      render();
     }});
-    $('btn-start').disabled=!(room.mode&&room.total);
+    $('btn-start').disabled = !(lobbySelectedMode && lobbySelectedCount);
   }
 
-  $('btn-start').onclick=async()=>{if(isHost) await hostStartGame();};
-  $('btn-leave-lobby').onclick=()=>{hardReset();};
-  $('btn-leave-end').onclick=()=>{hardReset();};
+  $('btn-start').onclick = async ()=>{
+    const fresh = await loadRoom(roomCode); if(!fresh || !fresh.mode || !fresh.total) return;
+    showScreen('screen-loading');
+    const q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]);
+    const fresh2 = await loadRoom(roomCode);
+    fresh2.usedQuestions = (fresh2.usedQuestions||[]).concat([q.question]);
+    fresh2.currentQuestion = q; fresh2.phase='question'; fresh2.phaseStartedAt = Date.now(); fresh2.round = 0;
+    Object.values(fresh2.players).forEach(p=>{ p.answered=false; p.choice=null; });
+    await saveRoom(fresh2); room=fresh2; render();
+  };
 
-  $('btn-restart').onclick=async()=>{
-    if(soloMode){soloMode=false;hardReset();return;}
-    if(isHost) await hostRestartGame();
-    else { const c=[...peerConnections.values()][0]; sendConn(c,{type:'restart'}); }
+  function leaveRoomMultiplayer(){ hardReset(); }
+  $('btn-leave-lobby').onclick = leaveRoomMultiplayer;
+  $('btn-leave-end').onclick = hardReset;
+
+  $('btn-restart').onclick = async ()=>{
+    if(soloMode){ soloMode=false; hardReset(); return; }
+    const fresh = await loadRoom(roomCode); if(!fresh) return;
+    fresh.phase='lobby'; fresh.round=0; fresh.mode=null; fresh.total=null; fresh.usedQuestions=[]; fresh.stopRequested=false; fresh.currentQuestion=null;
+    Object.values(fresh.players).forEach(p=>{ p.score=0; p.health=100; p.answered=false; p.choice=null; p.ageTotal=0; p.ageCount=0; p.loveTotal=0; });
+    await saveRoom(fresh); room=fresh; lobbySelectedMode=null; lobbySelectedCount=null; render();
   };
 
   async function submitAnswer(idx){
     if(localAnsweredThisRound) return;
-    localAnsweredThisRound=true;
-    if(isHost){
-      if(!room || room.phase!=='question') return;
-      const me=room.players[playerId];
-      if(me && !me.answered){me.answered=true;me.choice=idx;broadcastState();render();}
-    }else{
-      const c=[...peerConnections.values()][0];
-      if(!c){localAnsweredThisRound=false;return;}
-      sendConn(c,{type:'answer',playerId,idx});
-      if(room && room.players[playerId]){room.players[playerId].answered=true;room.players[playerId].choice=idx;render();}
+    localAnsweredThisRound = true;
+    const fresh = await loadRoom(roomCode);
+    if(!fresh || fresh.phase!=='question'){ localAnsweredThisRound=false; return; }
+    const me = fresh.players && fresh.players[playerId];
+    if(me && me.answered){ room=fresh; render(); return; }
+    const updatedPlayer = { ...(me || {name:playerName, score:0, health:100}), answered:true, choice:idx };
+    const ok = await patchRoom('rooms/'+encodeURIComponent(roomCode)+'/players/'+encodeURIComponent(playerId), updatedPlayer);
+    if(ok){
+      fresh.players = fresh.players || {}; fresh.players[playerId] = updatedPlayer;
+      room=fresh; render();
+    } else {
+      localAnsweredThisRound=false;
+      $('home-error').textContent='উত্তর পাঠানো যায়নি। আবার চেষ্টা করো।';
     }
   }
 
   function startPolling(){
     stopPolling();
-    tickTimer=setInterval(tick,300);
-    authorityTimer=isHost?setInterval(hostAuthorityCheck,300):null;
-    if(!isHost) $('loading-line').textContent='হোস্টের অপেক্ষায়…';
+    pollTimer = setInterval(pollOnce, 1500);
+    tickTimer = setInterval(tick, 300);
+    pollOnce();
+  }
+  function stopPolling(){ if(pollTimer) clearInterval(pollTimer); if(tickTimer) clearInterval(tickTimer); pollTimer=null; tickTimer=null; }
+
+  async function pollOnce(){
+    if(!roomCode) return;
+    const fresh = await loadRoom(roomCode);
+    if(!fresh) return;
+    const phaseChanged = !room || room.phase!==fresh.phase || room.round!==fresh.round;
+    room = fresh;
+    if(phaseChanged){ hintShown=false; localAnsweredThisRound=false; $('btn-hint').disabled=false; $('hint-text').classList.add('hidden'); }
+    if(isHost) await hostAuthorityCheck();
     render();
   }
 
-  function stopPolling(){
-    if(tickTimer) clearInterval(tickTimer);
-    if(authorityTimer) clearInterval(authorityTimer);
-    tickTimer=null;authorityTimer=null;
+  async function hostAuthorityCheck(){
+    if(!room) return;
+    const now = Date.now();
+    const elapsed = now-(room.phaseStartedAt||now);
+    if(room.phase==='question'){
+      const allAnswered = Object.values(room.players).every(p=>p.answered);
+      if(allAnswered || elapsed>QUESTION_MS){
+        const fresh = await loadRoom(roomCode);
+        if(fresh && fresh.phase==='question' && fresh.round===room.round){
+          const cfg = modeCfg(fresh.mode); const q = fresh.currentQuestion;
+          Object.values(fresh.players).forEach(p=>{
+            if(cfg.needsCorrect){
+              if(p.answered && p.choice===q.correctIndex) p.score+=100; else p.health=Math.max(0,p.health-15);
+            } else if(cfg.extraField==='ageWeights' && p.answered && p.choice>=0 && q.ageWeights){
+              p.ageTotal=(p.ageTotal||0)+q.ageWeights[p.choice]; p.ageCount=(p.ageCount||0)+1;
+            } else if(cfg.extraField==='loveWeights' && p.answered && p.choice>=0 && q.loveWeights){
+              p.loveTotal=(p.loveTotal||0)+q.loveWeights[p.choice]; p.loveCount=(p.loveCount||0)+1;
+            }
+          });
+          fresh.phase='reveal'; fresh.phaseStartedAt=Date.now();
+          await saveRoom(fresh); room=fresh;
+        }
+      }
+    } else if(room.phase==='reveal' && elapsed>REVEAL_MS){
+      const fresh = await loadRoom(roomCode);
+      if(fresh && fresh.phase==='reveal' && fresh.round===room.round){
+        const isDone = fresh.stopRequested || (fresh.total!=='inf' && (fresh.round+1)>=fresh.total);
+        if(isDone){ fresh.phase='end'; await saveRoom(fresh); room=fresh; }
+        else {
+          fresh.phase='loading'; await saveRoom(fresh); room=fresh; render();
+          const q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]);
+          const fresh2 = await loadRoom(roomCode);
+          if(fresh2 && fresh2.phase==='loading'){
+            fresh2.usedQuestions=(fresh2.usedQuestions||[]).concat([q.question]);
+            fresh2.currentQuestion=q; fresh2.round=fresh.round+1; fresh2.phase='question'; fresh2.phaseStartedAt=Date.now();
+            Object.values(fresh2.players).forEach(p=>{ p.answered=false; p.choice=null; });
+            await saveRoom(fresh2); room=fresh2;
+          }
+        }
+      }
+    }
   }
 
-  function hostAuthorityCheck(){
-    if(!isHost || !room) return;
-    const now=Date.now(), elapsed=now-(room.phaseStartedAt||now);
-    if(room.phase==='question'){
-      const allAnswered=Object.values(room.players).length>0 && Object.values(room.players).every(p=>p.answered);
-      if(allAnswered || elapsed>QUESTION_MS){
-        const cfg=modeCfg(room.mode),q=room.currentQuestion;
-        Object.values(room.players).forEach(p=>{
-          if(cfg.needsCorrect){
-            if(p.answered && p.choice===q.correctIndex) p.score+=100;
-            else p.health=Math.max(0,p.health-15);
-          }else if(cfg.extraField==='ageWeights' && p.answered && p.choice>=0 && q.ageWeights){
-            p.ageTotal=(p.ageTotal||0)+q.ageWeights[p.choice];p.ageCount=(p.ageCount||0)+1;
-          }else if(cfg.extraField==='loveWeights' && p.answered && p.choice>=0 && q.loveWeights){
-            p.loveTotal=(p.loveTotal||0)+q.loveWeights[p.choice];p.loveCount=(p.loveCount||0)+1;
-          }
-        });
-        room.phase='reveal';room.phaseStartedAt=Date.now();
-        broadcastState();render();
-      }
-    }else if(room.phase==='reveal' && elapsed>REVEAL_MS){
-      const done=room.stopRequested || (room.total!=='inf' && (room.round+1)>=room.total);
-      if(done){room.phase='end';broadcastState();render();}
-      else hostNextQuestion();
-    }
+  function tick(){
+    if(!room || room.phase!=='question') return;
+    const elapsed = Date.now()-(room.phaseStartedAt||Date.now());
+    const remain = Math.max(0, QUESTION_MS-elapsed);
+    const pct = Math.max(0, Math.min(100,(remain/QUESTION_MS)*100));
+    const bar=$('q-timerbar'); if(bar){ bar.style.width=pct+'%'; bar.classList.toggle('urgent', pct<25); }
   }
 
   /* ---------- multiplayer render ---------- */
