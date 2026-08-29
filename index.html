@@ -404,6 +404,9 @@
   let playerId=null, playerName="", roomCode=null, isHost=false, room=null;
   let pollTimer=null, tickTimer=null;
   let hintShown=false, localAnsweredThisRound=false;
+  let pendingChoice=null;
+  let lastMPRenderSignature='';
+  let hostAuthorityBusy=false;
   let soloMode=false, soloState=null; // {mode, total, round, score, health, current, used[], ageTotal, ageCount}
   let selectedMode=null, selectedCount=null, soloTimerEnabled=false;
   let lobbySelectedMode=null, lobbySelectedCount=null, lobbyTimerEnabled=false;
@@ -622,7 +625,7 @@
 
   $('btn-home').onclick = ()=>{ hardReset(); };
   function hardReset(){
-    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; soloMode=false; soloState=null;
+    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
     selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
     $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
     showScreen('screen-home');
@@ -925,44 +928,76 @@
   };
 
   async function submitAnswer(idx){
+    // Optimistic UI: select immediately. Never wait for Firebase before showing the choice.
     if(localAnsweredThisRound) return;
+    if(!room || room.phase!=='question') return;
+    const me = room.players && room.players[playerId];
+    if(!me || me.answered) return;
+
     localAnsweredThisRound = true;
-    const fresh = await loadRoom(roomCode);
-    if(!fresh || fresh.phase!=='question'){ localAnsweredThisRound=false; return; }
-    const me = fresh.players && fresh.players[playerId];
-    if(me && me.answered){ room=fresh; render(); return; }
-    const updatedPlayer = { ...(me || {name:playerName, score:0, health:100}), answered:true, choice:idx };
+    pendingChoice = idx;
+    const previous = { ...me };
+    const updatedPlayer = { ...me, answered:true, choice:idx };
+    room.players[playerId] = updatedPlayer;
+    lastMPRenderSignature = '';
+    render();
+
     const ok = await patchRoom('rooms/'+encodeURIComponent(roomCode)+'/players/'+encodeURIComponent(playerId), updatedPlayer);
-    if(ok){
-      fresh.players = fresh.players || {}; fresh.players[playerId] = updatedPlayer;
-      room=fresh; render();
+    if(!ok){
+      // Roll back only if this exact local answer is still pending.
+      if(pendingChoice===idx && room && room.phase==='question'){
+        room.players[playerId] = previous;
+        pendingChoice=null;
+        localAnsweredThisRound=false;
+        lastMPRenderSignature='';
+        render();
+        $('home-error').textContent='উত্তর পাঠানো যায়নি। আবার চেষ্টা করো।';
+      }
     } else {
-      localAnsweredThisRound=false;
-      $('home-error').textContent='উত্তর পাঠানো যায়নি। আবার চেষ্টা করো।';
+      pendingChoice=null;
     }
   }
 
   function startPolling(){
     stopPolling();
-    pollTimer = setInterval(pollOnce, 1500);
-    tickTimer = setInterval(tick, 300);
+    // Firebase REST polling is only for remote changes. Local clicks never wait for it.
+    pollTimer = setInterval(pollOnce, 800);
+    tickTimer = setInterval(tick, 250);
     pollOnce();
   }
-  function stopPolling(){ if(pollTimer) clearInterval(pollTimer); if(tickTimer) clearInterval(tickTimer); pollTimer=null; tickTimer=null; }
+  function stopPolling(){ if(pollTimer) clearInterval(pollTimer); if(tickTimer) clearInterval(tickTimer); pollTimer=null; tickTimer=null; hostAuthorityBusy=false; }
 
   async function pollOnce(){
     if(!roomCode) return;
     const fresh = await loadRoom(roomCode);
     if(!fresh) return;
     const phaseChanged = !room || room.phase!==fresh.phase || room.round!==fresh.round;
+
+    // Do not let an older server snapshot visually undo a click that is still being uploaded.
+    if(pendingChoice!==null && fresh.phase==='question' && fresh.players && fresh.players[playerId]){
+      const serverMe=fresh.players[playerId];
+      if(!serverMe.answered || serverMe.choice!==pendingChoice){
+        fresh.players[playerId] = { ...serverMe, answered:true, choice:pendingChoice };
+      } else {
+        pendingChoice=null;
+      }
+    }
+
     room = fresh;
-    if(phaseChanged){ hintShown=false; localAnsweredThisRound=false; $('btn-hint').disabled=false; $('hint-text').classList.add('hidden'); }
-    if(isHost) await hostAuthorityCheck();
+    if(phaseChanged){
+      hintShown=false;
+      if(pendingChoice===null) localAnsweredThisRound=false;
+      $('btn-hint').disabled=false; $('hint-text').classList.add('hidden');
+      lastMPRenderSignature='';
+    }
+    if(isHost && !hostAuthorityBusy) await hostAuthorityCheck();
     render();
   }
 
   async function hostAuthorityCheck(){
-    if(!room) return;
+    if(!room || hostAuthorityBusy) return;
+    hostAuthorityBusy=true;
+    try{
     const now = Date.now();
     const elapsed = now-(room.phaseStartedAt||now);
     if(room.phase==='question'){
@@ -1002,8 +1037,8 @@
         }
       }
     }
+    } finally { hostAuthorityBusy=false; }
   }
-
   function tick(){
     if(!room || room.phase!=='question') return;
     const enabled=!!room.timerEnabled;
@@ -1035,18 +1070,39 @@
     $('q-roundlabel').textContent = room.total==='inf' ? `প্রশ্ন ${room.round+1}` : `প্রশ্ন ${room.round+1} / ${room.total}`;
     $('q-text').textContent = q.question;
     updateTimerBar(!!room.timerEnabled, room.timerEnabled ? (Date.now()-(room.phaseStartedAt||Date.now())) : 0);
-    const wrap=$('q-options'); wrap.innerHTML='';
+
+    const effectiveAnswered = !!me.answered || pendingChoice!==null;
+    const effectiveChoice = pendingChoice!==null ? pendingChoice : me.choice;
+    const wrap=$('q-options');
     const letters=['ক','খ','গ','ঘ'];
+
+    // Reuse the existing buttons instead of destroying/recreating them every poll.
+    if(wrap.children.length !== q.options.length){
+      wrap.innerHTML='';
+      q.options.forEach((label, idx)=>{
+        const b=document.createElement('button');
+        b.type='button';
+        b.className='opt';
+        b.innerHTML=`<span class="optkey">${letters[idx]}</span><span class="optlabel"></span>`;
+        b.dataset.idx=String(idx);
+        b.addEventListener('click', ()=>submitAnswer(Number(b.dataset.idx)));
+        wrap.appendChild(b);
+      });
+    }
     q.options.forEach((label, idx)=>{
-      const b=document.createElement('button');
-      b.className='opt'+(me.choice===idx?' selected':'');
-      b.innerHTML=`<span class="optkey">${letters[idx]}</span><span>${escapeHtml(label)}</span>`;
-      if(!me.answered) b.onclick=()=>submitAnswer(idx); else b.classList.add('locked');
-      wrap.appendChild(b);
+      const b=wrap.children[idx];
+      if(!b) return;
+      const labelNode=b.querySelector('.optlabel');
+      if(labelNode) labelNode.textContent=label;
+      b.classList.toggle('selected', effectiveChoice===idx);
+      b.classList.toggle('locked', effectiveAnswered);
+      b.disabled=effectiveAnswered;
+      b.setAttribute('aria-pressed', effectiveChoice===idx ? 'true' : 'false');
     });
+
     const total = Object.keys(room.players).length;
     const answeredCount = Object.values(room.players).filter(p=>p.answered).length;
-    $('q-status').textContent = me.answered ? (TXT.answered_you + TXT.waiting_others(answeredCount,total)) : '';
+    $('q-status').textContent = effectiveAnswered ? (TXT.answered_you + TXT.waiting_others(answeredCount,total)) : '';
     $('btn-hint').classList.toggle('hidden', !q.hint);
     if(hintShown && q.hint){ $('hint-text').textContent=q.hint; $('hint-text').classList.remove('hidden'); $('btn-hint').disabled=true; }
     else { $('hint-text').classList.add('hidden'); $('btn-hint').disabled=false; }
@@ -1133,8 +1189,21 @@
   }
 
   function render(){
-    if(soloMode) return; // solo flow renders itself directly
+    if(soloMode) return;
     if(!room){ showScreen('screen-home'); return; }
+
+    if(room.phase==='question'){
+      const playersSig=Object.entries(room.players||{}).map(([id,p])=>id+':'+(p.answered?1:0)+':'+(p.choice??'')+':'+(p.score||0)+':'+(p.health||0)).join('|');
+      const sig=[room.phase,room.round,room.currentQuestion?.question||'',room.timerEnabled?'1':'0',playersSig,hintShown?'1':'0',pendingChoice??''].join('~');
+      if(sig===lastMPRenderSignature){
+        updateTimerBar(!!room.timerEnabled, room.timerEnabled ? (Date.now()-(room.phaseStartedAt||Date.now())) : 0);
+        return;
+      }
+      lastMPRenderSignature=sig;
+    } else {
+      lastMPRenderSignature='';
+    }
+
     if(room.phase==='lobby'){ showScreen('screen-lobby'); renderLobby(); }
     else if(room.phase==='loading'){ showScreen('screen-loading'); }
     else if(room.phase==='question'){ showScreen('screen-question'); renderMPQuestion(); }
