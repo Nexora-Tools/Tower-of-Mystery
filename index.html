@@ -134,6 +134,17 @@
   .countbtn.selected{ border-color:var(--torch); background:rgba(232,163,61,0.16); color:var(--torch-glow); }
   .countbtn small{ display:block; font-size:9px; font-weight:600; color:var(--parchment-dim); margin-top:2px; }
 
+  .timer-setting{ display:flex; align-items:center; justify-content:space-between; gap:12px; background:rgba(255,255,255,0.03); border:1px solid var(--stone-line); border-radius:12px; padding:11px 13px; margin:10px 0 4px; }
+  .timer-setting .ttext{ font-size:12.5px; font-weight:700; }
+  .timer-setting .tsub{ display:block; color:var(--parchment-dim); font-size:10.5px; font-weight:500; margin-top:2px; }
+  .switch{ position:relative; width:48px; height:28px; flex:0 0 auto; }
+  .switch input{ opacity:0; width:0; height:0; }
+  .slider{ position:absolute; inset:0; cursor:pointer; background:rgba(255,255,255,0.10); border:1px solid var(--stone-line); border-radius:999px; transition:.2s; }
+  .slider:before{ content:''; position:absolute; width:20px; height:20px; left:3px; top:3px; border-radius:50%; background:var(--parchment-dim); transition:.2s; }
+  .switch input:checked + .slider{ background:rgba(232,163,61,0.25); border-color:var(--torch); }
+  .switch input:checked + .slider:before{ transform:translateX(20px); background:var(--torch-glow); }
+  .switch input:focus-visible + .slider{ outline:2px solid var(--torch); outline-offset:2px; }
+
   /* story / loading */
   .eyebrow{ text-align:center; font-size:10.5px; letter-spacing:0.12em; color:var(--violet); font-weight:700; margin-bottom:10px; }
   .loadingcard{ text-align:center; padding:32px 10px; }
@@ -240,6 +251,10 @@
   <div id="screen-count" class="hidden">
     <p class="eyebrow">কয়টি প্রশ্ন খেলতে চাও?</p>
     <div class="countrow" id="count-row"></div>
+    <div class="timer-setting">
+      <div><span class="ttext">⏱ টাইমার</span><span class="tsub">চালু করলে প্রতি প্রশ্নে ২২ সেকেন্ড</span></div>
+      <label class="switch"><input type="checkbox" id="solo-timer-toggle"><span class="slider"></span></label>
+    </div>
     <button class="btn btn-primary" id="btn-count-next" style="margin-top:10px;" disabled>🚪 শুরু করো</button>
   </div>
 
@@ -258,6 +273,10 @@
       <div class="modegrid" id="lobby-mode-grid"></div>
       <p class="sectionlabel">প্রশ্ন সংখ্যা</p>
       <div class="countrow" id="lobby-count-row"></div>
+      <div class="timer-setting">
+        <div><span class="ttext">⏱ প্রশ্নের টাইমার</span><span class="tsub">চালু = ২২ সেকেন্ড · বন্ধ = কোনো সময়সীমা নেই</span></div>
+        <label class="switch"><input type="checkbox" id="lobby-timer-toggle"><span class="slider"></span></label>
+      </div>
       <button class="btn btn-primary" id="btn-start" style="margin-top:6px;" disabled>⚔️ অভিযান শুরু করো</button>
     </div>
     <div class="waittext hidden" id="lobby-wait"><span class="spinner"></span>হোস্ট মোড বেছে নিচ্ছে…</div>
@@ -386,8 +405,8 @@
   let pollTimer=null, tickTimer=null;
   let hintShown=false, localAnsweredThisRound=false;
   let soloMode=false, soloState=null; // {mode, total, round, score, health, current, used[], ageTotal, ageCount}
-  let selectedMode=null, selectedCount=null;
-  let lobbySelectedMode=null, lobbySelectedCount=null;
+  let selectedMode=null, selectedCount=null, soloTimerEnabled=false;
+  let lobbySelectedMode=null, lobbySelectedCount=null, lobbyTimerEnabled=false;
 
   const $ = id => document.getElementById(id);
   const genId = () => Math.random().toString(36).slice(2,10)+Date.now().toString(36).slice(-4);
@@ -484,7 +503,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
   $('btn-home').onclick = ()=>{ hardReset(); };
   function hardReset(){
     stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; soloMode=false; soloState=null;
-    selectedMode=null; selectedCount=null; lobbySelectedMode=null; lobbySelectedCount=null;
+    selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
     $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
     showScreen('screen-home');
   }
@@ -534,8 +553,10 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
       selectedCount=v; renderCountScreen(); $('btn-count-next').disabled=false;
     }});
   }
+  $('solo-timer-toggle').onchange = e=>{ soloTimerEnabled = !!e.target.checked; };
+
   $('btn-count-next').onclick = async ()=>{
-    soloState = { mode:selectedMode, total:selectedCount, round:0, score:0, health:100, current:null, used:[], ageTotal:0, ageCount:0, stop:false };
+    soloState = { mode:selectedMode, total:selectedCount, round:0, score:0, health:100, current:null, used:[], ageTotal:0, ageCount:0, stop:false, timerEnabled:soloTimerEnabled };
     showScreen('screen-loading');
     await soloNextQuestion();
   };
@@ -549,18 +570,27 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     hintShown=false; localAnsweredThisRound=false; $('btn-hint').disabled=false; $('hint-text').classList.add('hidden');
     showScreen('screen-question');
     renderSoloQuestion();
-    startSoloTimer();
+    if(soloState.timerEnabled) startSoloTimer(); else updateTimerBar(false);
   }
 
   let soloTickTimer=null;
+  function updateTimerBar(enabled, elapsed=0){
+    const wrap=document.querySelector('.timerbar-wrap');
+    const bar=$('q-timerbar');
+    if(wrap) wrap.classList.toggle('hidden', !enabled);
+    if(bar){
+      const pct=enabled ? Math.max(0, Math.min(100, ((QUESTION_MS-elapsed)/QUESTION_MS)*100)) : 100;
+      bar.style.width=pct+'%'; bar.classList.toggle('urgent', enabled && pct<25);
+    }
+  }
   function startSoloTimer(){
     if(soloTickTimer) clearInterval(soloTickTimer);
+    updateTimerBar(true,0);
     soloTickTimer = setInterval(()=>{
-      if(!soloState || soloState.answered){ return; }
+      if(!soloState || soloState.answered || !soloState.timerEnabled){ return; }
       const elapsed = Date.now()-soloState.phaseStartedAt;
       const remain = Math.max(0, QUESTION_MS-elapsed);
-      const pct = Math.max(0, Math.min(100,(remain/QUESTION_MS)*100));
-      const bar=$('q-timerbar'); if(bar){ bar.style.width=pct+'%'; bar.classList.toggle('urgent', pct<25); }
+      updateTimerBar(true, elapsed);
       if(remain<=0){ soloAnswer(-1); }
     }, 250);
   }
@@ -581,6 +611,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
       wrap.appendChild(b);
     });
     $('q-status').textContent = soloState.answered ? TXT.answered_you : '';
+    updateTimerBar(!!soloState.timerEnabled, soloState.timerEnabled ? (Date.now()-soloState.phaseStartedAt) : 0);
     $('btn-hint').classList.toggle('hidden', !q.hint);
     $('hint-text').classList.add('hidden'); hintShown=false; $('btn-hint').disabled=false;
     $('btn-stop').classList.toggle('hidden', soloState.total!=='inf');
@@ -605,6 +636,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     if(soloState.answered) return;
     soloState.answered = true; soloState.choice = idx;
     if(soloTickTimer) clearInterval(soloTickTimer);
+    updateTimerBar(false);
     const cfg = modeCfg(soloState.mode); const q = soloState.current;
     if(cfg.needsCorrect){
       if(idx===q.correctIndex) soloState.score += 100; else soloState.health = Math.max(0, soloState.health-15);
@@ -687,7 +719,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     $('home-error').textContent='';
     playerId = genId(); playerName = name; isHost = true; roomCode = genCode();
     room = { code:roomCode, hostId:playerId, phase:'lobby', mode:null, total:null, round:0,
-      players:{ [playerId]:{ name, score:0, health:100, answered:false, choice:null } }, usedQuestions:[], stopRequested:false };
+      players:{ [playerId]:{ name, score:0, health:100, answered:false, choice:null } }, usedQuestions:[], stopRequested:false, timerEnabled:false };
     const ok = await saveRoom(room);
     const verify = ok ? await loadRoom(roomCode) : null;
     if(!verify){ $('home-error').textContent = TXT.err_create_failed; room=null; roomCode=null; return; }
@@ -736,11 +768,21 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
       const fresh = await loadRoom(roomCode); if(fresh){ fresh.total=v; await saveRoom(fresh); room=fresh; }
       render();
     }});
+    const timerToggle=$('lobby-timer-toggle');
+    if(timerToggle){
+      timerToggle.checked=!!lobbyTimerEnabled;
+      timerToggle.onchange=async ()=>{
+        lobbyTimerEnabled=timerToggle.checked;
+        const fresh=await loadRoom(roomCode);
+        if(fresh){ fresh.timerEnabled=lobbyTimerEnabled; await saveRoom(fresh); room=fresh; }
+      };
+    }
     $('btn-start').disabled = !(lobbySelectedMode && lobbySelectedCount);
   }
 
   $('btn-start').onclick = async ()=>{
     const fresh = await loadRoom(roomCode); if(!fresh || !fresh.mode || !fresh.total) return;
+    fresh.timerEnabled=!!lobbyTimerEnabled;
     showScreen('screen-loading');
     const q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]);
     const fresh2 = await loadRoom(roomCode);
@@ -757,9 +799,9 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
   $('btn-restart').onclick = async ()=>{
     if(soloMode){ soloMode=false; hardReset(); return; }
     const fresh = await loadRoom(roomCode); if(!fresh) return;
-    fresh.phase='lobby'; fresh.round=0; fresh.mode=null; fresh.total=null; fresh.usedQuestions=[]; fresh.stopRequested=false; fresh.currentQuestion=null;
+    fresh.phase='lobby'; fresh.round=0; fresh.mode=null; fresh.total=null; fresh.usedQuestions=[]; fresh.stopRequested=false; fresh.currentQuestion=null; fresh.timerEnabled=false;
     Object.values(fresh.players).forEach(p=>{ p.score=0; p.health=100; p.answered=false; p.choice=null; p.ageTotal=0; p.ageCount=0; p.loveTotal=0; });
-    await saveRoom(fresh); room=fresh; lobbySelectedMode=null; lobbySelectedCount=null; render();
+    await saveRoom(fresh); room=fresh; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false; render();
   };
 
   async function submitAnswer(idx){
@@ -805,7 +847,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     const elapsed = now-(room.phaseStartedAt||now);
     if(room.phase==='question'){
       const allAnswered = Object.values(room.players).every(p=>p.answered);
-      if(allAnswered || elapsed>QUESTION_MS){
+      if(allAnswered || (room.timerEnabled && elapsed>QUESTION_MS)){
         const fresh = await loadRoom(roomCode);
         if(fresh && fresh.phase==='question' && fresh.round===room.round){
           const cfg = modeCfg(fresh.mode); const q = fresh.currentQuestion;
@@ -844,10 +886,9 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
 
   function tick(){
     if(!room || room.phase!=='question') return;
+    const enabled=!!room.timerEnabled;
     const elapsed = Date.now()-(room.phaseStartedAt||Date.now());
-    const remain = Math.max(0, QUESTION_MS-elapsed);
-    const pct = Math.max(0, Math.min(100,(remain/QUESTION_MS)*100));
-    const bar=$('q-timerbar'); if(bar){ bar.style.width=pct+'%'; bar.classList.toggle('urgent', pct<25); }
+    updateTimerBar(enabled, elapsed);
   }
 
   /* ---------- multiplayer render ---------- */
@@ -861,7 +902,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     });
     if(isHost){
       $('lobby-host-controls').classList.remove('hidden'); $('lobby-wait').classList.add('hidden');
-      lobbySelectedMode = room.mode || lobbySelectedMode; lobbySelectedCount = room.total || lobbySelectedCount;
+      lobbySelectedMode = room.mode || lobbySelectedMode; lobbySelectedCount = room.total || lobbySelectedCount; lobbyTimerEnabled = !!room.timerEnabled;
       renderLobbyModeControls();
     } else {
       $('lobby-host-controls').classList.add('hidden'); $('lobby-wait').classList.remove('hidden');
@@ -873,6 +914,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     $('q-modelabel').textContent = cfg.icon+' '+cfg.label;
     $('q-roundlabel').textContent = room.total==='inf' ? `প্রশ্ন ${room.round+1}` : `প্রশ্ন ${room.round+1} / ${room.total}`;
     $('q-text').textContent = q.question;
+    updateTimerBar(!!room.timerEnabled, room.timerEnabled ? (Date.now()-(room.phaseStartedAt||Date.now())) : 0);
     const wrap=$('q-options'); wrap.innerHTML='';
     const letters=['ক','খ','গ','ঘ'];
     q.options.forEach((label, idx)=>{
@@ -892,6 +934,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
   }
 
   function renderMPReveal(){
+    updateTimerBar(false);
     const cfg = modeCfg(room.mode); const q = room.currentQuestion; const me = room.players[playerId]||{};
     const banner=$('reveal-banner');
     if(cfg.needsCorrect){
@@ -979,6 +1022,7 @@ JSON ফরম্যাট (হুবহু এই কীগুলো):
     else if(room.phase==='end'){ showScreen('screen-end'); renderMPEnd(); }
   }
 
+  updateTimerBar(false);
   showScreen('screen-home');
 })();
 </script>
