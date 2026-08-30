@@ -447,10 +447,13 @@
   let pollTimer=null, tickTimer=null;
   let hintShown=false, localAnsweredThisRound=false;
   let pendingChoice=null;
+  let localAnswerRound=-1;
+  let localAnswerChoice=null;
   let lastMPRenderSignature='';
   let lastLobbyRenderSignature='';
   let hostAuthorityBusy=false;
   let pollInFlight=false;
+  let gameStarting=false;
   let soloMode=false, soloState=null; // {mode, total, round, score, health, current, used[], ageTotal, ageCount}
   let selectedMode=null, selectedCount=null, soloTimerEnabled=false;
   let lobbySelectedMode=null, lobbySelectedCount=null, lobbyTimerEnabled=false;
@@ -468,6 +471,17 @@
 
   function roomUrl(code){
     return FIREBASE_DB_URL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(code) + '.json';
+  }
+  function roundAnswersUrl(code, round){
+    return FIREBASE_DB_URL.replace(/\/$/,'') + '/rooms/' + encodeURIComponent(code) + '/answers/' + encodeURIComponent(String(round)) + '.json';
+  }
+  async function loadRoundAnswers(code, round){
+    try{
+      return (await firebaseFetch(roundAnswersUrl(code, round), {method:'GET'})) || {};
+    }catch(e){
+      console.warn('Round answers load failed:', e);
+      return {};
+    }
   }
   async function firebaseFetch(url, options={}){
     const controller = new AbortController();
@@ -750,9 +764,6 @@
 
   async function apiGenerateQuestion(mode, usedList){
     const usedNorm=usedList.map(normQ);
-    // Build a fresh candidate set on every request. This means the first
-    // few questions are not locked to the same 2/5/10 items, and after the
-    // base questions are used, hundreds of parameterized combinations remain.
     const candidates=[];
     const seen=new Set(usedNorm);
     for(let i=0;i<120;i++){
@@ -762,9 +773,6 @@
         if(candidates.length>=40) break;
       }
     }
-    // Keep the original curated pool available too, but only if it has not
-    // already been played. Random choice across both sources prevents the
-    // game from feeling like it is replaying a fixed sequence.
     const base=AUTO[mode]||[];
     for(const x of base){
       if(!seen.has(normQ(x[0]))){
@@ -789,7 +797,7 @@
 
   $('btn-home').onclick = ()=>{ hardReset(); };
   function hardReset(){
-    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
+    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; localAnswerRound=-1; localAnswerChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
     selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
     $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
     showScreen('screen-home');
@@ -818,6 +826,31 @@
       b.onclick = ()=> onSelect(v);
       container.appendChild(b);
     });
+  }
+
+  // Guaranteed-unused local safety net. Used only if the normal generator
+  // cannot produce another question.
+  function makeEmergencyQuestion(mode, usedList){
+    const used=new Set((usedList||[]).map(normQ));
+    const templates={
+      funny:()=>{ const a=pick(['রোবট','বিড়াল','এলিয়েন','মশা','পেঙ্গুইন']); return {
+        question:`যদি ${a} তোমার শিক্ষক হতো, প্রথমে কী করতে পারে?`,
+        options:['অদ্ভুত নিয়ম বানাতে পারে','সূর্য বন্ধ করতে পারে','সমুদ্র সরাতে পারে','চাঁদ লুকাতে পারে'],correctIndex:0}; },
+      angry:()=>({question:`রাগী প্রশ্ন: ${pick([5,7,9,11])} এর সঙ্গে ১ যোগ করলে কত?`,options:['৬','৮','১০','১২'],correctIndex:0}),
+      baby:()=>({question:`সহজ প্রশ্ন: ২ + ${pick([1,2,3])} = কত?`,options:['২','৩','৪','৫'],correctIndex:0}),
+      iq:()=>{const a=pick([3,4,5,6,7]),b=pick([2,3,4]);const ans=a+b;return {question:`${a}টি বলের সঙ্গে আরও ${b}টি যোগ করলে মোট কত?`,options:[String(ans),String(ans+1),String(ans+2),String(a)],correctIndex:0};},
+      hardcore:()=>{const a=pick([7,9,11,13,15]),b=pick([4,5,6]);const ans=a*b;return {question:`${a} × ${b} = কত?`,options:[String(ans),String(ans+b),String(ans-b),String(a+b)],correctIndex:0};},
+      puzzle:()=>({question:`কোন জিনিসটি যত বেশি নাও, তত বেশি রেখে যাও?`,options:['পদচিহ্ন','ছায়া','বাতাস','আলো'],correctIndex:0}),
+      age:()=>({question:`কোনো বড় সিদ্ধান্তের আগে কী করা সবচেয়ে পরিণত কাজ?`,options:['তথ্য যাচাই ও সময় নিয়ে ভাবা','তাড়াহুড়া করে সিদ্ধান্ত নেওয়া','অন্যকে দোষ দেওয়া','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,ageWeights:[10,3,2,1]}),
+      love:()=>({question:`সম্পর্কে মতভেদ হলে কোন আচরণটি সবচেয়ে স্বাস্থ্যকর?`,options:['শান্তভাবে কথা বলা','চুপ করে শাস্তি দেওয়া','অপমান করা','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,loveWeights:[10,3,1,2]})
+    };
+    function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+    for(let i=0;i<500;i++){
+      const q=(templates[mode]||templates.iq)();
+      q.question += ` • ${i+1}`;
+      if(!used.has(normQ(q.question))) return shuffleQuestion(q);
+    }
+    return null;
   }
 
   /* ================= SOLO FLOW ================= */
@@ -850,7 +883,30 @@
 
   async function soloNextQuestion(){
     showScreen('screen-loading');
-    const q = await apiGenerateQuestion(soloState.mode, soloState.used);
+    let q=null;
+    try{
+      q = await apiGenerateQuestion(soloState.mode, soloState.used);
+    }catch(e){
+      console.warn('Solo question generation failed:',e);
+      const used=new Set((soloState.used||[]).map(normQ));
+      const base=AUTO[soloState.mode]||[];
+      const candidates=base.filter(x=>!used.has(normQ(x[0])));
+      if(candidates.length){
+        const x=candidates[Math.floor(Math.random()*candidates.length)];
+        q={question:x[0],options:x[1],correctIndex:null,hint:null,reveal:x[3]||null};
+        if(soloState.mode==='age') q.ageWeights=x[2];
+        else if(soloState.mode==='love') q.loveWeights=x[2];
+        else if(soloState.mode!=='angry'){ q.correctIndex=x[2]; q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।'; }
+        q=shuffleQuestion(q);
+      }
+    }
+    if(!q){
+      q=makeEmergencyQuestion(soloState.mode, soloState.used);
+    }
+    if(!q){
+      showSoloEnd();
+      return;
+    }
     soloState.used.push(q.question);
     soloState.current = q; soloState.answered=false; soloState.choice=null;
     soloState.phaseStartedAt = Date.now();
@@ -913,9 +969,8 @@
 
   $('btn-stop').onclick = async ()=>{
     if(soloMode){ soloState.stop=true; showSoloEnd(); }
-    else if(room){
-      const fresh = await loadRoom(roomCode);
-      if(fresh){ fresh.stopRequested = true; await saveRoom(fresh); room=fresh; }
+    else if(room && isHost){
+      await hostStopGame();
     }
   };
 
@@ -969,483 +1024,598 @@
     launchConfetti();
   }
 
-  /* ================= MULTIPLAYER: Firebase layer ================= */
-  async function saveRoom(r){
-    r.updatedAt=Date.now();
-    try{
-      await firebaseFetch(roomUrl(r.code), {method:'PUT', body:JSON.stringify(r)});
-      return true;
-    }catch(e){
-      console.error('Firebase save failed:', e);
-      $('home-error').textContent = 'Firebase সংযোগ হচ্ছে না। ইন্টারনেট ও Database Rules পরীক্ষা করো।';
-      return false;
-    }
+
+  /* ================= MULTIPLAYER FLOW =================
+     Firebase is authoritative for room/question/round state.
+     The local player's answer is authoritative for the local UI until
+     the round actually changes. Answers live separately under /answers.
+  ====================================================== */
+
+  function activePlayers(r){
+    return Object.values((r && r.players) || {}).filter(p => p && p.left !== true);
   }
-  async function loadRoom(code){
-    try{
-      return await firebaseFetch(roomUrl(code), {method:'GET'});
-    }catch(e){
-      console.error('Firebase load failed:', e);
-      return null;
-    }
+
+  function patchRoomData(patch){
+    if(!roomCode) return Promise.reject(new Error('no-room'));
+    return firebaseFetch(roomUrl(roomCode), {
+      method:'PATCH',
+      body:JSON.stringify(patch)
+    });
   }
-  async function patchRoom(path, value){
+
+  async function saveRoomSafe(){
+    if(!roomCode || !room) return;
+    return patchRoomData(room);
+  }
+
+  async function submitMultiplayerAnswer(choice){
+    if(!room || !room.currentQuestion || room.phase!=='question') return;
+    const round = Number(room.round || 0);
+
+    if(localAnsweredThisRound && localAnswerRound===round) return;
+
+    // Lock locally FIRST. Firebase polling cannot visually undo this.
+    localAnswerRound = round;
+    localAnswerChoice = choice;
+    localAnsweredThisRound = true;
+    pendingChoice = choice;
+    renderMultiplayerQuestion();
+
+    const answer = {
+      playerId,
+      choice: Number.isInteger(choice) ? choice : null,
+      answered: true,
+      answerRound: round,
+      timestamp: Date.now()
+    };
+
     try{
-      await firebaseFetch(FIREBASE_DB_URL.replace(/\/$/,'') + '/' + path.replace(/^\//,'') + '.json', {method:'PUT', body:JSON.stringify(value)});
-      return true;
+      await firebaseFetch(
+        FIREBASE_DB_URL.replace(/\/$/,'') +
+        '/rooms/' + encodeURIComponent(roomCode) +
+        '/answers/' + encodeURIComponent(String(round)) +
+        '/' + encodeURIComponent(playerId) + '.json',
+        {method:'PUT', body:JSON.stringify(answer)}
+      );
+      pendingChoice = null;
     }catch(e){
-      console.error('Firebase patch failed:', e);
-      return false;
+      console.error('Answer save failed:',e);
+      pendingChoice = null;
+      $('q-status').textContent = '⚠️ উত্তর সংরক্ষণ হয়নি। আবার চেষ্টা করো।';
+      // Do not silently unselect. The player may retry.
+      localAnsweredThisRound = false;
+      localAnswerChoice = null;
+      renderMultiplayerQuestion();
     }
   }
 
-  async function createUniqueRoom(){
-    for(let attempt=0; attempt<8; attempt++){
-      const code=genCode();
-      const existing=await loadRoom(code);
-      if(existing===null){ return code; }
+  function renderMultiplayerQuestion(){
+    if(!room || !room.currentQuestion) return;
+    const cfg=modeCfg(room.mode);
+    const q=room.currentQuestion;
+    const round=Number(room.round||0);
+
+    $('q-modelabel').textContent=(cfg?.icon||'🧩')+' '+(cfg?.label||room.mode||'মোড');
+    $('q-roundlabel').textContent =
+      room.total==='inf' ? `প্রশ্ন ${round+1}` : `প্রশ্ন ${round+1} / ${room.total}`;
+    $('q-text').textContent=q.question;
+
+    const elapsed=room.phaseStartedAt ? Date.now()-room.phaseStartedAt : 0;
+    updateTimerBar(!!room.timerEnabled, elapsed);
+
+    $('btn-hint').classList.toggle('hidden', !q.hint);
+    $('hint-text').classList.add('hidden');
+    $('btn-hint').disabled=false;
+    $('btn-stop').classList.toggle('hidden', !isHost);
+
+    const wrap=$('q-options');
+    wrap.innerHTML='';
+    const letters=['ক','খ','গ','ঘ'];
+    const selected =
+      localAnsweredThisRound && localAnswerRound===round
+        ? localAnswerChoice
+        : null;
+
+    q.options.forEach((label,idx)=>{
+      const b=document.createElement('button');
+      b.type='button';
+      b.className='opt'+(selected===idx?' selected':'')+
+        (selected!==null?' locked':'');
+      b.innerHTML=`<span class="optkey">${letters[idx]}</span><span>${escapeHtml(label)}</span>`;
+      if(selected===null){
+        b.onclick=()=>submitMultiplayerAnswer(idx);
+      }else{
+        b.disabled=true;
+      }
+      wrap.appendChild(b);
+    });
+
+    const players=activePlayers(room);
+    let answeredCount=0;
+    if(room.roundAnswers){
+      answeredCount=Object.values(room.roundAnswers).filter(a =>
+        a && a.answered===true && Number(a.answerRound)===round
+      ).length;
     }
-    throw new Error('Could not generate a free room code');
+    $('q-status').textContent = localAnsweredThisRound && localAnswerRound===round
+      ? TXT.answered_you + ` ${answeredCount}/${players.length} জন উত্তর দিয়েছে`
+      : `${answeredCount}/${players.length} জন উত্তর দিয়েছে`;
   }
 
-  $('btn-create').onclick = async ()=>{
-    const name = $('input-name').value.trim();
-    if(!name){ $('home-error').textContent = TXT.err_name; return; }
-    const button=$('btn-create');
-    button.disabled=true;
-    $('home-error').textContent='রুম তৈরি হচ্ছে…';
+  function renderLobby(){
+    if(!room) return;
+    $('lobby-code').textContent=roomCode||'XXXX';
+
+    const players=activePlayers(room);
+    const sig=players.map(p=>p.id+':'+p.name+':'+(p.host?'1':'0')).join('|');
+    if(sig!==lastLobbyRenderSignature){
+      $('lobby-players').innerHTML=players.map(p=>`
+        <div class="prow">
+          <div class="avatar">${escapeHtml((p.name||'?').slice(0,1).toUpperCase())}</div>
+          <div class="pname">${escapeHtml(p.name||'Player')}</div>
+          ${p.host?'<span class="badge-host">হোস্ট</span>':''}
+        </div>`).join('');
+      lastLobbyRenderSignature=sig;
+    }
+
+    const hostControls=$('lobby-host-controls');
+    const wait=$('lobby-wait');
+    hostControls.classList.toggle('hidden',!isHost);
+    wait.classList.toggle('hidden',isHost);
+
+    if(isHost){
+      buildModeGrid($('lobby-mode-grid'),{
+        selectedId:lobbySelectedMode,
+        playerCount:players.length,
+        onSelect:id=>{
+          lobbySelectedMode=id;
+          renderLobby();
+        }
+      });
+      buildCountRow($('lobby-count-row'),{
+        selectedVal:lobbySelectedCount,
+        onSelect:v=>{
+          lobbySelectedCount=v;
+          renderLobby();
+        }
+      });
+      $('lobby-timer-toggle').checked=!!lobbyTimerEnabled;
+      $('btn-start').disabled=!(lobbySelectedMode && lobbySelectedCount && players.length>=1);
+    }
+  }
+
+  async function createRoom(){
+    const name=($('input-name').value||'').trim();
+    if(!name){ $('home-error').textContent=TXT.err_name; return; }
+
+    const code=genCode();
+    playerId=genId();
+    playerName=name;
+    roomCode=code;
+    isHost=true;
+    lobbySelectedMode=null;
+    lobbySelectedCount=null;
+    lobbyTimerEnabled=false;
+
+    room={
+      code,
+      hostId:playerId,
+      mode:null,
+      total:null,
+      timerEnabled:false,
+      round:0,
+      phase:'lobby',
+      phaseStartedAt:Date.now(),
+      currentQuestion:null,
+      players:{
+        [playerId]:{id:playerId,name:playerName,host:true,joinedAt:Date.now(),left:false}
+      }
+    };
+
     try{
-      playerId = genId(); playerName = name; isHost = true;
-      roomCode = await createUniqueRoom();
-      room = { code:roomCode, hostId:playerId, phase:'lobby', mode:null, total:null, round:0,
-        players:{ [playerId]:{ name, score:0, health:100, answered:false, choice:null } },
-        usedQuestions:[], stopRequested:false, timerEnabled:false };
-      const ok = await saveRoom(room);
-      if(!ok) throw new Error('save failed');
-      // Do not perform a second GET here. The successful PUT is enough.
-      lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
-      pendingChoice=null; lastLobbyRenderSignature='';
-      $('home-error').textContent='';
+      await firebaseFetch(roomUrl(code),{
+        method:'PUT',
+        body:JSON.stringify(room)
+      });
+      lastLobbyRenderSignature='';
+      showScreen('screen-lobby');
+      renderLobby();
       startPolling();
-      render();
     }catch(e){
       console.error(e);
-      room=null; roomCode=null; isHost=false;
-      $('home-error').textContent = 'রুম তৈরি করা যায়নি। '+(e.message||'Firebase সংযোগ পরীক্ষা করো।');
-    }finally{ button.disabled=false; }
-  };
-
-  $('btn-join').onclick = async ()=>{
-    const name = $('input-name').value.trim();
-    const code = $('input-code').value.trim().toUpperCase();
-    if(!name){ $('home-error').textContent = TXT.err_name; return; }
-    if(!/^[A-Z2-9]{4}$/.test(code)){ $('home-error').textContent = TXT.err_code; return; }
-    const button=$('btn-join');
-    button.disabled=true;
-    $('home-error').textContent='রুম খোঁজা হচ্ছে…';
-    try{
-      let found = await loadRoom(code);
-      if(!found){ $('home-error').textContent = TXT.err_notfound; return; }
-      if(found.phase!=='lobby'){ $('home-error').textContent='এই রুমে ইতিমধ্যে খেলা শুরু হয়ে গেছে।'; return; }
-      playerId = genId(); playerName = name; isHost=false; roomCode=code;
-      const newPlayer = { name, score:0, health:100, answered:false, choice:null };
-      const ok = await patchRoom('rooms/'+encodeURIComponent(code)+'/players/'+encodeURIComponent(playerId), newPlayer);
-      if(!ok) throw new Error('player write failed');
-      found.players = found.players || {}; found.players[playerId] = newPlayer;
-      room = found; pendingChoice=null; lastLobbyRenderSignature='';
-      $('home-error').textContent='';
-      startPolling(); render();
-    }catch(e){
-      console.error(e);
-      $('home-error').textContent='রুমে যোগ দেওয়া যায়নি। '+(e.message||'Firebase সংযোগ পরীক্ষা করো।');
-    }finally{ button.disabled=false; }
-  };
-  $('input-code').addEventListener('input', e=>{ e.target.value = e.target.value.toUpperCase(); });
-  $('btn-copy').onclick = ()=>{
-    if(navigator.clipboard && navigator.clipboard.writeText){
-      navigator.clipboard.writeText(roomCode||'').then(()=>{
-        $('btn-copy').textContent = TXT.copied; setTimeout(()=>{ $('btn-copy').textContent='কপি'; },1400);
-      }).catch(()=>{});
+      room=null; roomCode=null; playerId=null; isHost=false;
+      $('home-error').textContent=TXT.err_create_failed;
     }
-  };
-
-  function renderLobbyModeControls(){
-    const playerCount = Object.keys(room.players||{}).length;
-    buildModeGrid($('lobby-mode-grid'), { selectedId: lobbySelectedMode, playerCount, onSelect:(id)=>{
-      lobbySelectedMode=id;
-      room.mode=id;
-      render();
-      patchRoom('rooms/'+encodeURIComponent(roomCode)+'/mode', id);
-    }});
-    buildCountRow($('lobby-count-row'), { selectedVal: lobbySelectedCount, onSelect:(v)=>{
-      lobbySelectedCount=v;
-      room.total=v;
-      render();
-      patchRoom('rooms/'+encodeURIComponent(roomCode)+'/total', v);
-    }});
-    const timerToggle=$('lobby-timer-toggle');
-    if(timerToggle){
-      timerToggle.checked=!!lobbyTimerEnabled;
-      timerToggle.onchange=()=>{
-        lobbyTimerEnabled=timerToggle.checked;
-        room.timerEnabled=lobbyTimerEnabled;
-        render();
-        patchRoom('rooms/'+encodeURIComponent(roomCode)+'/timerEnabled', lobbyTimerEnabled);
-      };
-    }
-    $('btn-start').disabled = !(lobbySelectedMode && lobbySelectedCount);
   }
-  $('btn-start').onclick = async ()=>{
-    if(!isHost || !room || !room.mode || !room.total) return;
-    const button=$('btn-start'); button.disabled=true;
+
+  async function joinRoom(){
+    const name=($('input-name').value||'').trim();
+    const code=($('input-code').value||'').trim().toUpperCase();
+    if(!name){$('home-error').textContent=TXT.err_name;return;}
+    if(code.length!==4){$('home-error').textContent=TXT.err_code;return;}
+
     try{
-      room.timerEnabled=!!lobbyTimerEnabled;
-      room.phase='loading'; room.phaseStartedAt=Date.now();
-      render();
-      const q = await apiGenerateQuestion(room.mode, room.usedQuestions||[]);
-      room.usedQuestions=(room.usedQuestions||[]).concat([q.question]);
-      room.currentQuestion=q; room.phase='question'; room.phaseStartedAt=Date.now(); room.round=0;
-      Object.values(room.players||{}).forEach(p=>{p.answered=false; p.choice=null;});
-      localAnsweredThisRound=false; pendingChoice=null;
-      const ok=await saveRoom(room);
-      if(!ok) throw new Error('game start write failed');
-      render();
+      const found=await firebaseFetch(roomUrl(code),{method:'GET'});
+      if(!found || found.phase==='end'){
+        $('home-error').textContent=TXT.err_notfound;
+        return;
+      }
+
+      playerId=genId();
+      playerName=name;
+      roomCode=code;
+      isHost=false;
+      room=found;
+
+      const players={...(found.players||{})};
+      players[playerId]={
+        id:playerId,name:playerName,host:false,joinedAt:Date.now(),left:false
+      };
+
+      await patchRoomData({players});
+      lastLobbyRenderSignature='';
+      showScreen(found.phase==='lobby'?'screen-lobby':'screen-loading');
+      startPolling();
     }catch(e){
       console.error(e);
-      room.phase='lobby';
-      $('home-error').textContent='গেম শুরু করা যায়নি। '+(e.message||'Firebase সংযোগ পরীক্ষা করো।');
-      render();
-    }finally{ button.disabled=false; }
-  };
-  function leaveRoomMultiplayer(){ hardReset(); }
-  $('btn-leave-lobby').onclick = leaveRoomMultiplayer;
-  $('btn-leave-end').onclick = hardReset;
+      $('home-error').textContent=TXT.err_notfound;
+    }
+  }
 
-  $('btn-restart').onclick = async ()=>{
-    if(soloMode){ soloMode=false; hardReset(); return; }
-    const fresh = await loadRoom(roomCode); if(!fresh) return;
-    fresh.phase='lobby'; fresh.round=0; fresh.mode=null; fresh.total=null; fresh.usedQuestions=[]; fresh.stopRequested=false; fresh.currentQuestion=null; fresh.timerEnabled=false;
-    Object.values(fresh.players).forEach(p=>{ p.score=0; p.health=100; p.answered=false; p.choice=null; p.ageTotal=0; p.ageCount=0; p.loveTotal=0; });
-    await saveRoom(fresh); room=fresh; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false; render();
-  };
+  $('btn-create').onclick=createRoom;
+  $('btn-join').onclick=joinRoom;
 
-  async function submitAnswer(idx){
-    if(localAnsweredThisRound || !room || room.phase!=='question') return;
-    const me=room.players && room.players[playerId];
-    if(!me || me.answered) return;
+  async function startMultiplayerGame(){
+    if(!isHost || !room || gameStarting) return;
+    if(!lobbySelectedMode || !lobbySelectedCount) return;
 
-    localAnsweredThisRound=true;
-    pendingChoice=idx;
-    const roundAtClick=room.round;
-    const previous={...me};
-    const updatedPlayer={...me,answered:true,choice:idx};
-    room.players[playerId]=updatedPlayer;
-    lastMPRenderSignature='';
-    render();
+    gameStarting=true;
+    $('btn-start').disabled=true;
+    showScreen('screen-loading');
+    $('loading-line').textContent='টাওয়ার প্রথম প্রশ্ন প্রস্তুত করছে…';
 
-    const ok=await patchRoom('rooms/'+encodeURIComponent(roomCode)+'/players/'+encodeURIComponent(playerId),updatedPlayer);
-    if(!ok && room && room.phase==='question' && room.round===roundAtClick && pendingChoice===idx){
-      room.players[playerId]=previous;
-      pendingChoice=null; localAnsweredThisRound=false; lastMPRenderSignature='';
-      render();
-      $('home-error').textContent='উত্তর পাঠানো যায়নি। আবার চেষ্টা করো।';
+    const used=[];
+    let q=null;
+    try{
+      q=await apiGenerateQuestion(lobbySelectedMode,used);
+    }catch(e){
+      console.warn(e);
+    }
+    if(!q) q=makeEmergencyQuestion(lobbySelectedMode,used);
+    if(!q){
+      gameStarting=false;
+      $('btn-start').disabled=false;
+      showScreen('screen-lobby');
       return;
     }
-    // Clear the temporary local choice only after Firebase has accepted it.
-    // Keep the rendered answer locked while the host checks the round.
-    if(ok && room && room.round===roundAtClick && pendingChoice===idx){
+
+    q.questionId=genId();
+    used.push(q.question);
+
+    room={
+      ...room,
+      mode:lobbySelectedMode,
+      total:lobbySelectedCount,
+      timerEnabled:!!lobbyTimerEnabled,
+      round:0,
+      phase:'question',
+      phaseStartedAt:Date.now(),
+      currentQuestion:q,
+      usedQuestions:used,
+      players:room.players||{}
+    };
+
+    try{
+      await saveRoomSafe();
+      localAnsweredThisRound=false;
+      localAnswerRound=-1;
+      localAnswerChoice=null;
       pendingChoice=null;
-      lastMPRenderSignature='';
-      render();
-      // If this player is the host, check immediately instead of waiting for
-      // the next 1.2s polling tick. This removes the noticeable next-question delay.
-      if(isHost && !hostAuthorityBusy) {
-        await hostAuthorityCheck();
-        render();
+      showScreen('screen-question');
+      renderMultiplayerQuestion();
+      startMultiplayerTimers();
+    }catch(e){
+      console.error('start game failed',e);
+      showScreen('screen-lobby');
+      $('q-status').textContent='⚠️ গেম শুরু করা যায়নি।';
+    }finally{
+      gameStarting=false;
+    }
+  }
+
+  $('btn-start').onclick=startMultiplayerGame;
+
+  async function hostAdvanceFromAnswers(){
+    if(!isHost || hostAuthorityBusy || !room || room.phase!=='question') return;
+    hostAuthorityBusy=true;
+    try{
+      const currentRound=Number(room.round||0);
+      const fresh=await firebaseFetch(roomUrl(roomCode),{method:'GET'});
+      if(!fresh || fresh.phase!=='question' || Number(fresh.round||0)!==currentRound) return;
+
+      const answers=await loadRoundAnswers(roomCode,currentRound);
+      const players=activePlayers(fresh);
+      const validAnswers={};
+
+      players.forEach(p=>{
+        const a=answers[p.id];
+        if(a && a.answered===true && Number(a.answerRound)===currentRound){
+          validAnswers[p.id]=a;
+        }
+      });
+
+      const allAnswered=players.length>0 && players.every(p=>validAnswers[p.id]);
+      const timerExpired=fresh.timerEnabled &&
+        (Date.now()-Number(fresh.phaseStartedAt||Date.now())>=QUESTION_MS);
+
+      if(!allAnswered && !timerExpired) return;
+
+      const mergedPlayers={...(fresh.players||{})};
+      const q=fresh.currentQuestion;
+
+      players.forEach(p=>{
+        const a=validAnswers[p.id];
+        mergedPlayers[p.id]={
+          ...mergedPlayers[p.id],
+          answered:!!a,
+          choice:a ? a.choice : null,
+          answerRound:currentRound
+        };
+      });
+
+      const revealAt=Date.now();
+      await patchRoomData({
+        phase:'reveal',
+        phaseStartedAt:revealAt,
+        roundAnswers:validAnswers,
+        players:mergedPlayers
+      });
+
+      room={...fresh,phase:'reveal',phaseStartedAt:revealAt,
+        roundAnswers:validAnswers,players:mergedPlayers};
+
+      renderMultiplayerReveal();
+      setTimeout(()=>hostNextRound(currentRound),REVEAL_MS);
+    }catch(e){
+      console.error('host transition failed:',e);
+    }finally{
+      hostAuthorityBusy=false;
+    }
+  }
+
+  async function hostNextRound(previousRound){
+    if(!isHost || !room || Number(room.round||0)!==previousRound) return;
+    try{
+      const fresh=await firebaseFetch(roomUrl(roomCode),{method:'GET'});
+      if(!fresh || fresh.phase!=='reveal' || Number(fresh.round||0)!==previousRound) return;
+
+      const total=fresh.total;
+      if(total!=='inf' && previousRound+1>=Number(total)){
+        await patchRoomData({phase:'end',phaseStartedAt:Date.now()});
+        room={...fresh,phase:'end'};
+        renderMultiplayerEnd();
+        return;
       }
+
+      const used=fresh.usedQuestions||[];
+      let q=null;
+      try{ q=await apiGenerateQuestion(fresh.mode,used); }catch(e){ console.warn(e); }
+      if(!q) q=makeEmergencyQuestion(fresh.mode,used);
+      if(!q){
+        // Last-resort unique question. This should almost never be needed.
+        q={
+          question:`টাওয়ারের নতুন চ্যালেঞ্জ ${previousRound+2}: ${genId()}`,
+          options:['প্রথম উত্তর','দ্বিতীয় উত্তর','তৃতীয় উত্তর','চতুর্থ উত্তর'],
+          correctIndex:0,hint:null,reveal:'নতুন চ্যালেঞ্জ সম্পন্ন!'
+        };
+      }
+
+      q.questionId=genId();
+      const nextRound=previousRound+1;
+      const nextUsed=[...used,q.question];
+
+      const freshPlayers={...(fresh.players||{})};
+      Object.keys(freshPlayers).forEach(id=>{
+        freshPlayers[id]={
+          ...freshPlayers[id],
+          answered:false,choice:null,answerRound:nextRound
+        };
+      });
+
+      await patchRoomData({
+        round:nextRound,
+        phase:'question',
+        phaseStartedAt:Date.now(),
+        currentQuestion:q,
+        usedQuestions:nextUsed,
+        roundAnswers:null,
+        players:freshPlayers
+      });
+    }catch(e){
+      console.error('next round failed:',e);
+    }
+  }
+
+  function renderMultiplayerReveal(){
+    if(!room || !room.currentQuestion) return;
+    showScreen('screen-reveal');
+    const q=room.currentQuestion;
+    const cfg=modeCfg(room.mode);
+    const answers=room.roundAnswers||{};
+    const me=answers[playerId];
+    let banner=$('reveal-banner');
+
+    if(cfg && cfg.needsCorrect){
+      const won=me && me.choice===q.correctIndex;
+      banner.className='revealbanner '+(won?'win':'lose');
+      banner.textContent=won
+        ? '✨ ঠিক উত্তর!'
+        : `সঠিক উত্তর: ${q.options[q.correctIndex] ?? 'অজানা'}`;
+    }else{
+      banner.className='revealbanner neutral';
+      banner.textContent=q.reveal||'পরবর্তী প্রশ্ন প্রস্তুত হচ্ছে…';
+    }
+
+    $('reveal-list').innerHTML=activePlayers(room).map(p=>{
+      const a=answers[p.id];
+      const ok=cfg?.needsCorrect && a && a.choice===q.correctIndex;
+      return `<div class="resultrow ${ok?'correct':'wrong'}">
+        <div class="rmark">${ok?'✓':(a?'✕':'—')}</div>
+        <div class="rname">${escapeHtml(p.name||'Player')}</div>
+        <div class="rpts">${a?'উত্তর দিয়েছে':'উত্তর দেয়নি'}</div>
+      </div>`;
+    }).join('');
+  }
+
+  function renderMultiplayerEnd(){
+    showScreen('screen-end');
+    const players=activePlayers(room).slice().sort((a,b)=>(Number(b.score)||0)-(Number(a.score)||0));
+    $('end-list').innerHTML=players.map((p,i)=>`
+      <div class="leaderrow ${i===0?'rank1':''}">
+        <div class="rankn">${i+1}</div>
+        <div style="flex:1"><div style="font-weight:700">${escapeHtml(p.name||'Player')}</div></div>
+        <div class="pscore">${Number(p.score)||0} ${TXT.pts}</div>
+      </div>`).join('');
+  }
+
+  async function pollMultiplayer(){
+    if(!roomCode || pollInFlight || gameStarting) return;
+    pollInFlight=true;
+    try{
+      const fresh=await firebaseFetch(roomUrl(roomCode),{method:'GET'});
+      if(!fresh) return;
+
+      const oldRound=room ? Number(room.round||0) : -1;
+      const newRound=Number(fresh.round||0);
+
+      // Preserve local answer while the same round is active.
+      if(newRound!==oldRound){
+        localAnsweredThisRound=false;
+        localAnswerChoice=null;
+        pendingChoice=null;
+        localAnswerRound=newRound;
+        hintShown=false;
+      }
+
+      room=fresh;
+
+      if(fresh.phase==='lobby'){
+        showScreen('screen-lobby');
+        renderLobby();
+        return;
+      }
+
+      if(fresh.phase==='question'){
+        const answers=await loadRoundAnswers(roomCode,newRound);
+        room.roundAnswers=answers||{};
+
+        // If this browser's answer is already saved, keep it locked.
+        const mine=room.roundAnswers[playerId];
+        if(mine && Number(mine.answerRound)===newRound && mine.answered===true){
+          localAnsweredThisRound=true;
+          localAnswerRound=newRound;
+          localAnswerChoice=mine.choice;
+        }
+
+        showScreen('screen-question');
+        renderMultiplayerQuestion();
+
+        if(isHost) await hostAdvanceFromAnswers();
+      }else if(fresh.phase==='reveal'){
+        const answers=await loadRoundAnswers(roomCode,newRound);
+        room.roundAnswers=answers||fresh.roundAnswers||{};
+        renderMultiplayerReveal();
+      }else if(fresh.phase==='end'){
+        renderMultiplayerEnd();
+      }
+    }catch(e){
+      console.warn('multiplayer poll failed:',e);
+    }finally{
+      pollInFlight=false;
     }
   }
 
   function startPolling(){
     stopPolling();
-    pollTimer=setInterval(pollOnce,1200);
-    tickTimer=setInterval(tick,250);
-    pollOnce();
+    pollTimer=setInterval(pollMultiplayer,1000);
+    pollMultiplayer();
   }
+
   function stopPolling(){
-    if(pollTimer) clearInterval(pollTimer);
+    if(pollTimer){clearInterval(pollTimer);pollTimer=null;}
+    if(tickTimer){clearInterval(tickTimer);tickTimer=null;}
+    if(soloTickTimer){clearInterval(soloTickTimer);soloTickTimer=null;}
+  }
+
+  function startMultiplayerTimers(){
     if(tickTimer) clearInterval(tickTimer);
-    pollTimer=null; tickTimer=null; hostAuthorityBusy=false; pollInFlight=false;
+    tickTimer=setInterval(()=>{
+      if(!room || room.phase!=='question') return;
+      updateTimerBar(!!room.timerEnabled, Date.now()-Number(room.phaseStartedAt||Date.now()));
+      if(isHost) hostAdvanceFromAnswers();
+    },250);
   }
 
-  async function pollOnce(){
-    if(!roomCode || pollInFlight) return;
-    pollInFlight=true;
+  $('btn-copy').onclick=async()=>{
     try{
-      const fresh=await loadRoom(roomCode);
-      if(!fresh) return;
-      const phaseChanged=!room || room.phase!==fresh.phase || room.round!==fresh.round;
+      await navigator.clipboard.writeText(roomCode||'');
+      $('btn-copy').textContent=TXT.copied;
+      setTimeout(()=>$('btn-copy').textContent='কপি',1200);
+    }catch(e){}
+  };
 
-      if(pendingChoice!==null && fresh.phase==='question' && fresh.players && fresh.players[playerId]){
-        const serverMe=fresh.players[playerId];
-        if(!serverMe.answered || serverMe.choice!==pendingChoice){
-          fresh.players[playerId]={...serverMe,answered:true,choice:pendingChoice};
-        }else{ pendingChoice=null; }
-      }
-
-      room=fresh;
-      if(phaseChanged){
-        hintShown=false;
-        if(pendingChoice===null) localAnsweredThisRound=false;
-        $('btn-hint').disabled=false; $('hint-text').classList.add('hidden');
-        lastMPRenderSignature=''; lastLobbyRenderSignature='';
-      }
-      if(isHost && !hostAuthorityBusy) await hostAuthorityCheck();
-      render();
-    }catch(e){ console.warn('poll failed',e); }
-    finally{ pollInFlight=false; }
-  }
-  async function hostAuthorityCheck(){
-    if(!room || hostAuthorityBusy) return;
-    hostAuthorityBusy=true;
+  $('btn-leave-lobby').onclick=async()=>{
     try{
-    const now = Date.now();
-    const elapsed = now-(room.phaseStartedAt||now);
-    if(room.phase==='question'){
-      const allAnswered = Object.values(room.players).every(p=>p.answered);
-      if(allAnswered || (room.timerEnabled && elapsed>QUESTION_MS)){
-        const fresh = await loadRoom(roomCode);
-        if(fresh && fresh.phase==='question' && fresh.round===room.round){
-          const cfg = modeCfg(fresh.mode); const q = fresh.currentQuestion;
-          Object.values(fresh.players).forEach(p=>{
-            if(cfg.needsCorrect){
-              if(p.answered && p.choice===q.correctIndex) p.score+=100; else p.health=Math.max(0,p.health-15);
-            } else if(cfg.extraField==='ageWeights' && p.answered && p.choice>=0 && q.ageWeights){
-              p.ageTotal=(p.ageTotal||0)+q.ageWeights[p.choice]; p.ageCount=(p.ageCount||0)+1;
-            } else if(cfg.extraField==='loveWeights' && p.answered && p.choice>=0 && q.loveWeights){
-              p.loveTotal=(p.loveTotal||0)+q.loveWeights[p.choice]; p.loveCount=(p.loveCount||0)+1;
-            }
-          });
-          fresh.phase='reveal'; fresh.phaseStartedAt=Date.now();
-          await saveRoom(fresh); room=fresh;
-          lastMPRenderSignature='';
-          render();
+      if(roomCode && playerId){
+        const fresh=await firebaseFetch(roomUrl(roomCode),{method:'GET'});
+        if(fresh && fresh.players){
+          const players={...fresh.players};
+          delete players[playerId];
+          await patchRoomData({players});
         }
       }
-    } else if(room.phase==='reveal' && elapsed>REVEAL_MS){
-      const fresh = await loadRoom(roomCode);
-      if(fresh && fresh.phase==='reveal' && fresh.round===room.round){
-        const isDone = fresh.stopRequested || (fresh.total!=='inf' && (fresh.round+1)>=fresh.total);
-        if(isDone){ fresh.phase='end'; await saveRoom(fresh); room=fresh; }
-        else {
-          fresh.phase='loading'; await saveRoom(fresh); room=fresh; render();
-          let q=null;
-          try{ q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]); }
-          catch(e){
-            console.error('Question generation failed',e);
-            // Never leave the multiplayer game stuck in loading. Try a curated
-            // unused question as a final local fallback.
-            const used=new Set((fresh.usedQuestions||[]).map(normQ));
-            const base=AUTO[fresh.mode]||[];
-            const candidates=base.filter(x=>!used.has(normQ(x[0])));
-            if(candidates.length){
-              const x=candidates[Math.floor(Math.random()*candidates.length)];
-              q={question:x[0],options:x[1],correctIndex:null,hint:null,reveal:x[3]||null};
-              if(fresh.mode==='age') q.ageWeights=x[2];
-              else if(fresh.mode==='love') q.loveWeights=x[2];
-              else if(fresh.mode!=='angry'){ q.correctIndex=x[2]; q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।'; }
-              q=shuffleQuestion(q);
-            }
-          }
-          const fresh2 = await loadRoom(roomCode);
-          if(fresh2 && fresh2.phase==='loading' && q){
-            fresh2.usedQuestions=(fresh2.usedQuestions||[]).concat([q.question]);
-            fresh2.currentQuestion=q; fresh2.round=fresh.round+1; fresh2.phase='question'; fresh2.phaseStartedAt=Date.now();
-            Object.values(fresh2.players).forEach(p=>{ p.answered=false; p.choice=null; });
-            await saveRoom(fresh2); room=fresh2; lastMPRenderSignature='';
-          }
-        }
-      }
+    }catch(e){}
+    hardReset();
+  };
+
+  $('btn-restart').onclick=()=>{
+    hardReset();
+  };
+
+  $('btn-leave-end').onclick=()=>{
+    hardReset();
+  };
+
+  // Override the shared hint button during multiplayer.
+  $('btn-hint').onclick=()=>{
+    const q=soloMode ? soloState?.current : room?.currentQuestion;
+    if(!q || !q.hint) return;
+    hintShown=true;
+    $('hint-text').textContent=q.hint;
+    $('hint-text').classList.remove('hidden');
+    $('btn-hint').disabled=true;
+  };
+
+  // Ensure multiplayer stop button works.
+  async function hostStopGame(){
+    if(!isHost || !roomCode) return;
+    try{
+      await patchRoomData({phase:'end',phaseStartedAt:Date.now()});
+      room={...room,phase:'end'};
+      renderMultiplayerEnd();
+    }catch(e){ console.error(e); }
+  }
+
+  // Patch the existing stop handler so it remains compatible with both modes.
+  $('btn-stop').onclick=async()=>{
+    if(soloMode){
+      soloState.stop=true;
+      showSoloEnd();
+    }else if(room && isHost){
+      await hostStopGame();
     }
-    } finally { hostAuthorityBusy=false; }
-  }
-  function tick(){
-    if(!room || room.phase!=='question') return;
-    const enabled=!!room.timerEnabled;
-    const elapsed = Date.now()-(room.phaseStartedAt||Date.now());
-    updateTimerBar(enabled, elapsed);
-  }
+  };
 
-  /* ---------- multiplayer render ---------- */
-  function renderLobby(){
-    $('lobby-code').textContent = roomCode || 'XXXX';
-    const playersSig=Object.entries(room.players||{}).map(([pid,p])=>pid+':'+p.name).join('|');
-    const sig=[roomCode,playersSig,room.mode||'',room.total||'',room.timerEnabled?'1':'0',isHost?'H':'P'].join('~');
-    if(sig===lastLobbyRenderSignature) return;
-    lastLobbyRenderSignature=sig;
-
-    const wrap=$('lobby-players'); wrap.innerHTML='';
-    Object.entries(room.players||{}).forEach(([pid,p])=>{
-      const row=document.createElement('div'); row.className='prow';
-      row.innerHTML=`<div class="avatar">${escapeHtml((p.name||'?').slice(0,2).toUpperCase())}</div><div class="pname">${escapeHtml(p.name||'Player')}</div>${pid===room.hostId?'<span class="badge-host">'+TXT.host_tag+'</span>':''}`;
-      wrap.appendChild(row);
-    });
-    if(isHost){
-      $('lobby-host-controls').classList.remove('hidden'); $('lobby-wait').classList.add('hidden');
-      lobbySelectedMode=room.mode||lobbySelectedMode;
-      lobbySelectedCount=room.total||lobbySelectedCount;
-      lobbyTimerEnabled=!!room.timerEnabled;
-      renderLobbyModeControls();
-    }else{
-      $('lobby-host-controls').classList.add('hidden'); $('lobby-wait').classList.remove('hidden');
-    }
-  }
-  function renderMPQuestion(){
-    const cfg = modeCfg(room.mode); const q = room.currentQuestion; const me = room.players[playerId]||{};
-    $('q-modelabel').textContent = cfg.icon+' '+cfg.label;
-    $('q-roundlabel').textContent = room.total==='inf' ? `প্রশ্ন ${room.round+1}` : `প্রশ্ন ${room.round+1} / ${room.total}`;
-    $('q-text').textContent = q.question;
-    updateTimerBar(!!room.timerEnabled, room.timerEnabled ? (Date.now()-(room.phaseStartedAt||Date.now())) : 0);
-
-    const effectiveAnswered = !!me.answered || pendingChoice!==null;
-    const effectiveChoice = pendingChoice!==null ? pendingChoice : me.choice;
-    const wrap=$('q-options');
-    const letters=['ক','খ','গ','ঘ'];
-
-    // Reuse the existing buttons instead of destroying/recreating them every poll.
-    if(wrap.children.length !== q.options.length){
-      wrap.innerHTML='';
-      q.options.forEach((label, idx)=>{
-        const b=document.createElement('button');
-        b.type='button';
-        b.className='opt';
-        b.innerHTML=`<span class="optkey">${letters[idx]}</span><span class="optlabel"></span>`;
-        b.dataset.idx=String(idx);
-        b.addEventListener('click', ()=>submitAnswer(Number(b.dataset.idx)));
-        wrap.appendChild(b);
-      });
-    }
-    q.options.forEach((label, idx)=>{
-      const b=wrap.children[idx];
-      if(!b) return;
-      const labelNode=b.querySelector('.optlabel');
-      if(labelNode) labelNode.textContent=label;
-      b.classList.toggle('selected', effectiveChoice===idx);
-      b.classList.toggle('locked', effectiveAnswered);
-      b.disabled=effectiveAnswered;
-      b.setAttribute('aria-pressed', effectiveChoice===idx ? 'true' : 'false');
-    });
-
-    const total = Object.keys(room.players).length;
-    const answeredCount = Object.values(room.players).filter(p=>p.answered).length;
-    $('q-status').textContent = effectiveAnswered ? (TXT.answered_you + TXT.waiting_others(answeredCount,total)) : '';
-    $('btn-hint').classList.toggle('hidden', !q.hint);
-    if(hintShown && q.hint){ $('hint-text').textContent=q.hint; $('hint-text').classList.remove('hidden'); $('btn-hint').disabled=true; }
-    else { $('hint-text').classList.add('hidden'); $('btn-hint').disabled=false; }
-    $('btn-stop').classList.toggle('hidden', room.total!=='inf');
-  }
-
-  function renderMPReveal(){
-    updateTimerBar(false);
-    const cfg = modeCfg(room.mode); const q = room.currentQuestion; const me = room.players[playerId]||{};
-    const banner=$('reveal-banner');
-    if(cfg.needsCorrect){
-      const correct = me.choice===q.correctIndex;
-      banner.className='revealbanner '+(correct?'win':'lose');
-      banner.textContent=(correct?'✨ ঠিক উত্তর!':'উত্তরটি ভুল ছিল।')+(q.options[q.correctIndex]!==undefined?('  সঠিক উত্তর: '+q.options[q.correctIndex]):'');
-    } else {
-      banner.className='revealbanner neutral';
-      banner.textContent = q.reveal || 'প্রহরী চুপচাপ পরবর্তী প্রশ্নের দিকে এগিয়ে যাচ্ছে…';
-    }
-    const list=$('reveal-list'); list.innerHTML='';
-    const sorted = Object.entries(room.players).sort((a,b)=> (b[1].score||0)-(a[1].score||0));
-    sorted.forEach(([pid,p])=>{
-      const correct = cfg.needsCorrect ? (p.choice===q.correctIndex) : null;
-      const row=document.createElement('div');
-      row.className='resultrow'+(correct===null?'':(correct?' correct':' wrong'));
-      const rightSide = cfg.needsCorrect ? `${p.score||0} ${TXT.pts}` : '';
-      row.innerHTML = `<div class="rmark">${correct===null?'•':(correct?'✓':'✗')}</div>
-        <div class="rname">${escapeHtml(p.name)}${pid===room.hostId?' <span class="badge-host">'+TXT.host_tag+'</span>':''}
-          ${cfg.needsCorrect?`<div class="healthbar-wrap"><div class="healthbar" style="width:${p.health||0}%"></div></div>`:''}
-        </div>
-        <div class="rpts">${rightSide}</div>`;
-      list.appendChild(row);
-    });
-  }
-
-  function renderMPEnd(){
-    const cfg = modeCfg(room.mode);
-    const list=$('end-list'); list.innerHTML='';
-    const entries = Object.entries(room.players);
-    if(cfg.extraField==='ageWeights'){
-      entries.forEach(([pid,p])=>{
-        const age = p.ageCount ? Math.round(p.ageTotal/p.ageCount) : '—';
-        const row=document.createElement('div'); row.className='leaderrow';
-        row.innerHTML = `<div class="rankn">🎂</div><div class="avatar">${escapeHtml(p.name.slice(0,2).toUpperCase())}</div><div style="flex:1"><div style="font-weight:700;font-size:14px;">${escapeHtml(p.name)}</div></div><div class="pscore">${age} বছর</div>`;
-        list.appendChild(row);
-      });
-    } else if(cfg.extraField==='loveWeights' && entries.length===2){
-      const maxPossible = (room.round+1)*10;
-      const withPct = entries.map(([pid,p])=>({pid,p,pct: p.loveCount? Math.round((p.loveTotal/(p.loveCount*10))*100):0}));
-      withPct.sort((a,b)=>b.pct-a.pct);
-      withPct.forEach((e,idx)=>{
-        const row=document.createElement('div'); row.className='leaderrow'+(idx===0?' rank1':'');
-        row.innerHTML = `<div class="rankn">${idx===0?'❤️':'💛'}</div><div class="avatar">${escapeHtml(e.p.name.slice(0,2).toUpperCase())}</div><div style="flex:1"><div style="font-weight:700;font-size:14px;">${escapeHtml(e.p.name)}</div></div><div class="pscore">${e.pct}%</div>`;
-        list.appendChild(row);
-      });
-      const note=document.createElement('p'); note.className='footer-note';
-      note.textContent = `প্রহরীর রায়: ${escapeHtml(withPct[0].p.name)} বেশি ভালোবাসে বলে মনে হচ্ছে! 💘 (এটা শুধু মজার জন্য)`;
-      list.appendChild(note);
-    } else if(!cfg.needsCorrect){
-      entries.forEach(([pid,p])=>{
-        const row=document.createElement('div'); row.className='leaderrow';
-        row.innerHTML = `<div class="rankn">🙂</div><div class="avatar">${escapeHtml(p.name.slice(0,2).toUpperCase())}</div><div style="flex:1"><div style="font-weight:700;font-size:14px;">${escapeHtml(p.name)}</div></div>`;
-        list.appendChild(row);
-      });
-    } else {
-      const sorted = entries.sort((a,b)=>(b[1].score||0)-(a[1].score||0));
-      sorted.forEach(([pid,p],idx)=>{
-        const medal = idx===0?'🥇':idx===1?'🥈':idx===2?'🥉':(idx+1);
-        const row=document.createElement('div'); row.className='leaderrow'+(idx===0?' rank1':'');
-        row.innerHTML = `<div class="rankn">${medal}</div><div class="avatar">${escapeHtml(p.name.slice(0,2).toUpperCase())}</div><div style="flex:1"><div style="font-weight:700;font-size:14px;">${escapeHtml(p.name)}</div></div><div class="pscore">${p.score||0} ${TXT.pts}</div>`;
-        list.appendChild(row);
-      });
-    }
-    launchConfetti();
-  }
-
-  function launchConfetti(){
-    const colors=['#e8a33d','#9b6dd6','#4fd1c5','#5fc78a','#e0596a'];
-    for(let i=0;i<26;i++){
-      const c=document.createElement('div'); c.className='confetti';
-      c.style.left=Math.random()*100+'vw'; c.style.background=colors[Math.floor(Math.random()*colors.length)];
-      c.style.animationDuration=(2.5+Math.random()*2)+'s'; c.style.borderRadius=Math.random()>0.5?'50%':'2px';
-      document.body.appendChild(c); setTimeout(()=>c.remove(),5000);
-    }
-  }
-
-  function render(){
-    if(soloMode) return;
-    if(!room){ showScreen('screen-home'); return; }
-
-    if(room.phase==='question'){
-      const playersSig=Object.entries(room.players||{}).map(([id,p])=>id+':'+(p.answered?1:0)+':'+(p.choice??'')+':'+(p.score||0)+':'+(p.health||0)).join('|');
-      const sig=[room.phase,room.round,room.currentQuestion?.question||'',room.timerEnabled?'1':'0',playersSig,hintShown?'1':'0',pendingChoice??''].join('~');
-      if(sig===lastMPRenderSignature){
-        updateTimerBar(!!room.timerEnabled, room.timerEnabled ? (Date.now()-(room.phaseStartedAt||Date.now())) : 0);
-        return;
-      }
-      lastMPRenderSignature=sig;
-    } else {
-      lastMPRenderSignature='';
-    }
-
-    if(room.phase==='lobby'){ showScreen('screen-lobby'); renderLobby(); }
-    else if(room.phase==='loading'){ showScreen('screen-loading'); }
-    else if(room.phase==='question'){ showScreen('screen-question'); renderMPQuestion(); }
-    else if(room.phase==='reveal'){ showScreen('screen-reveal'); renderMPReveal(); }
-    else if(room.phase==='end'){ showScreen('screen-end'); renderMPEnd(); }
-  }
 
   updateTimerBar(false);
   showScreen('screen-home');
