@@ -778,6 +778,33 @@
   }
 
 
+  // Final emergency fallback. This function is intentionally self-contained so
+  // an AI/API failure can never break Solo or Room mode.
+  function makeEmergencyQuestion(mode, usedList=[]){
+    const usedSet = new Set((Array.isArray(usedList) ? usedList : []).map(normQ));
+    const pool = AUTO[mode] || [];
+    const candidates = pool.filter(x => Array.isArray(x) && x[0] && !usedSet.has(normQ(x[0])));
+    if(!candidates.length) return null;
+    const x = candidates[Math.floor(Math.random()*candidates.length)];
+    const q = {
+      question: String(x[0]),
+      options: Array.isArray(x[1]) ? x[1].map(String) : [],
+      correctIndex: Number.isInteger(x[2]) ? x[2] : null,
+      hint: x[3] || null,
+      reveal: x[3] || null
+    };
+    if(mode==='age' && Array.isArray(x[2])) {
+      q.correctIndex=null;
+      q.ageWeights=x[2];
+    }
+    if(mode==='love' && Array.isArray(x[2])) {
+      q.correctIndex=null;
+      q.loveWeights=x[2];
+    }
+    if(q.options.length!==4) return null;
+    return shuffleQuestion(q);
+  }
+
   // The local generator above is the fallback used by the AI question generator.
 async function apiGenerateQuestion(mode, usedList){
     const used = Array.isArray(usedList) ? usedList : [];
