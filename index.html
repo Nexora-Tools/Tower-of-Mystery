@@ -378,7 +378,7 @@
   // unauthenticated read/write for development.
   const FIREBASE_DB_URL = 'https://mystery-of-tower-b26ff-default-rtdb.firebaseio.com';
   const STORAGE_OK = true;
-  const QUESTION_MS = 22000, REVEAL_MS = 5500;
+  const QUESTION_MS = 22000, REVEAL_MS = 1400;
 
   const MODES = [
     { id:'funny', icon:'😂', label:'মজার', needsCorrect:true, extraField:null,
@@ -629,38 +629,154 @@
   }
 
   function makeVariantQuestion(mode, usedNorm){
-    // After the base pool is exhausted, create additional unique variants.
-    // The numeric suffix is intentionally part of the question so exact
-    // duplicates cannot occur in a single run.
-    const n=usedNorm.length+1;
-    const cfg=modeCfg(mode);
-    const templates={
-      funny:[`আজকের মজার প্রশ্ন #${n}: যদি একটি হাঁস ${n} বার হাঁচি দেয়, তুমি কী আশা করবে?`,[`আরও একবার হাঁচি দেবে`,`ডানা দিয়ে মুখ ঢাকবে`,`উড়ে চলে যাবে`,`ঘুমিয়ে পড়বে`],0],
-      angry:[`আজকের রাগী প্রশ্ন #${n}: ${n} + ${n} কত?`,[String(n*2),String(n),String(n*2+1),String(n+1)],0],
-      iq:[`যুক্তির প্রশ্ন #${n}: ${n}টি বাক্সের প্রতিটিতে ১টি করে বল থাকলে মোট কয়টি বল?`,[String(n),String(n+1),String(Math.max(1,n-1)),String(n*2)],0],
-      puzzle:[`ধাঁধা #${n}: আমি প্রতিদিন তোমার সঙ্গে থাকি কিন্তু আমাকে ছুঁতে পারো না। আমি কী?`,['ছায়া','পাথর','চেয়ার','কাপ'],0],
-      hardcore:[`হার্ডকোর #${n}: ${n} × 3 + 1 কত?`,[String(n*3+1),String(n*3),String(n+3),String(n+1)],0],
-      baby:[`সহজ প্রশ্ন #${n}: ${n} এর পরের সংখ্যা কোনটি?`,[String(n+1),String(n),String(Math.max(0,n-1)),String(n+2)],0]
+    // Large local question engine. It deliberately creates many different
+    // question families instead of cycling through a tiny fallback list.
+    // Everything is generated in-browser, so GitHub Pages does not need an API key.
+    const used = new Set(usedNorm);
+    const out = [];
+    const add = (question, options, correctIndex, hint, reveal, extra={}) => {
+      const q = {question, options, correctIndex, hint:hint||null, reveal:reveal||null, ...extra};
+      if(!used.has(normQ(question)) && !out.some(x=>normQ(x.question)===normQ(question))) out.push(q);
     };
+    const pick = a => a[Math.floor(Math.random()*a.length)];
+    const shuffleArr = a => a.slice().sort(()=>Math.random()-0.5);
+
+    if(mode==='funny'){
+      const subjects=['বিড়াল','মুরগি','হাঁস','কচ্ছপ','রোবট','ভূত','এলিয়েন','ছাতা','জুতা','বালিশ','ফ্রিজ','মশা','বানর','পেঙ্গুইন','একজন অলস রাজা'];
+      const actions=[
+        ['অফিসে চাকরি পেলে প্রথমে কী করবে?',['জানালার পাশে বসবে','সব ফাইল খাবে','কম্পিউটারকে ছুটি দেবে','বসকে হোমওয়ার্ক দেবে'],0],
+        ['অনলাইনে ক্লাস করলে সবচেয়ে মজার সমস্যা কী হতে পারে?',['মাইক বন্ধ করতে ভুলে যাবে','স্কুলে সাঁতার কাটবে','খাতা উড়ে যাবে','বই রান্না করবে'],0],
+        ['একদিনের জন্য মানুষের বস হলে কী করার সম্ভাবনা বেশি?',['অদ্ভুত নিয়ম বানাবে','সবাইকে অদৃশ্য করবে','সূর্য বন্ধ করবে','সমুদ্র সরিয়ে দেবে'],0],
+        ['ভ্রমণে গেলে সবচেয়ে অদ্ভুত জিনিস কী চাইতে পারে?',['নিজের জন্য ছোট স্যুটকেস','মেঘের টিকিট','চাঁদের পাসপোর্ট','সমুদ্রের রিমোট'],0],
+        ['রাতে গোপনে কী করার চেষ্টা করতে পারে?',['ফ্রিজ খুলে দেখা','সূর্য জ্বালানো','পাহাড় সরানো','চাঁদ লুকানো'],0]
+      ];
+      for(let i=0;i<60;i++){ const s=pick(subjects), act=pick(actions); add(`${s} ${act[0]}`,act[1],act[2],'একটু কল্পনা করে দেখো।','প্রহরীর মতে এটাই সবচেয়ে মজার উত্তর! 😄'); }
+    }
+
+    if(mode==='angry'){
+      const qs=[
+        ['২ + ৩ = কত?',['৫','৬','৪','৮'],0],['এক বছরে কয় মাস?',['১২','১০','১১','১৩'],0],
+        ['এক দিনে কয় ঘণ্টা?',['২৪','১২','৩০','২০'],0],['বাংলাদেশের জাতীয় ফুল কোনটি?',['শাপলা','গোলাপ','জবা','বেলি'],0],
+        ['পানির রাসায়নিক সংকেত কোনটি?',['H₂O','CO₂','O₂','NaCl'],0],['সূর্য কোন দিক থেকে ওঠে?',['পূর্ব','পশ্চিম','উত্তর','দক্ষিণ'],0],
+        ['এক ডজন কতটি?',['১২','১০','১৪','২০'],0],['মানুষ সাধারণত কোন অঙ্গ দিয়ে দেখে?',['চোখ','কান','নাক','হাত'],0],
+        ['বরফ গলে সাধারণত কী হয়?',['পানি','আগুন','বালি','ধোঁয়া'],0],['পৃথিবীর প্রাকৃতিক উপগ্রহ কোনটি?',['চাঁদ','সূর্য','মঙ্গল','শুক্র'],0]
+      ];
+      const subjects=['আজকের রাগী প্রশ্ন','প্রহরীর বিরক্তিকর প্রশ্ন','আবারও সহজ প্রশ্ন','মেজাজ খারাপের কুইজ','এত সহজ কেন প্রশ্ন'];
+      for(let i=0;i<70;i++){ const q=pick(qs), prefix=pick(subjects); add(`${prefix}: ${q[0]}`,q[1],null,null,pick(['প্রহরী আজ কোনো উত্তরকেই সহজে মেনে নিচ্ছে না! 😏','ঠিক হলেও আজ একটু রাগ দেখাতেই হবে! 😤','উত্তর ঠিক হোক বা ভুল, প্রহরীর মেজাজ বদলাবে না! 😜'])); }
+    }
+
+    if(mode==='baby'){
+      const qs=[
+        ['এক হাতে সাধারণত কয়টি আঙুল থাকে?',['৩','৪','৫','৬'],2],['ঘাসের রং সাধারণত কী?',['নীল','সবুজ','কালো','বেগুনি'],1],
+        ['আমরা কোন অঙ্গ দিয়ে শুনি?',['চোখ','কান','নাক','মুখ'],1],['দুধ সাধারণত কী রঙের?',['লাল','সবুজ','সাদা','কালো'],2],
+        ['বিড়াল সাধারণত কী শব্দ করে?',['ম্যাঁও','ঘেউ','হাম্বা','কূজন'],0],['পাখি সাধারণত কী দিয়ে উড়ে?',['ডানা','লেজ','পা','কান'],0],
+        ['রাতে আকাশে কী দেখা যেতে পারে?',['সূর্য','চাঁদ','সমুদ্র','ঘাস'],1],['৫ - ২ কত?',['২','৩','৪','৭'],1],
+        ['কলা সাধারণত কী রঙের হয়?',['হলুদ','নীল','বেগুনি','ধূসর'],0],['মাছ কোথায় থাকে?',['পানিতে','গাছে','মেঘে','বালিশে'],0],
+        ['গরুর বাচ্চাকে কী বলে?',['বাছুর','ছানা','শাবক','পোনা'],0],['বৃষ্টিতে কী পড়ে?',['পানি','আগুন','বালি','পাতা'],0]
+      ];
+      const forms=['সহজ প্রশ্ন','ছোটদের প্রশ্ন','মজার সহজ প্রশ্ন','একদম সহজ কুইজ','আজকের ছোট্ট প্রশ্ন'];
+      for(let i=0;i<80;i++){ const q=pick(qs); add(`${pick(forms)}: ${q[0]}`,q[1],q[2],'বিকল্পগুলো দেখে ভাবো।','একদম ঠিক! সহজ প্রশ্নের সঠিক উত্তর এটাই।'); }
+    }
+
+    if(mode==='iq'){
+      const nums=[3,4,5,6,7,8,9,10,12,15,18,20,24,25,30];
+      for(let i=0;i<100;i++){
+        const n=pick(nums), kind=i%8;
+        if(kind===0){ const ans=n*2; add(`${n}টি বাক্সে প্রতিটিতে ২টি বল থাকলে মোট কয়টি বল?`,[String(ans),String(ans+2),String(ans-2),String(n)],0,'প্রতি বাক্সের বলের সংখ্যা দিয়ে গুণ করো।','প্রতিটি বাক্সে ২টি করে, তাই মোট '+ans+'টি।'); }
+        else if(kind===1){ const ans=n+7; add(`${n} থেকে ৭ যোগ করলে কত হয়?`,[String(ans),String(ans-7),String(ans+6),String(ans+14)],0,null,'যোগ করে ফল পাওয়া যায়।'); }
+        else if(kind===2){ const ans=n-3; add(`${n} থেকে ৩ বাদ দিলে কত থাকে?`,[String(ans),String(n+3),String(n-3+2),String(n)],0,null,'বিয়োগের ফল হলো '+ans+'।'); }
+        else if(kind===3){ const ans=n*3; add(`${n} জনের প্রত্যেকে ৩টি করে কলম পেলে মোট কতটি কলম লাগবে?`,[String(ans),String(n+3),String(n),String(ans+3)],0,null,'গুণ করলে দ্রুত হিসাব করা যায়।'); }
+        else if(kind===4){ const ans=n/2; if(Number.isInteger(ans)) add(`${n}টি জিনিস সমান দুই ভাগে ভাগ করলে প্রতি ভাগে কয়টি থাকবে?`,[String(ans),String(n),String(ans+1),String(n-2)],0,null,'সমান দুই ভাগ মানে ২ দিয়ে ভাগ।'); }
+        else if(kind===5){ const ans=n*5; add(`${n} মিনিট করে ৫টি ধাপ করলে মোট কত মিনিট?`,[String(ans),String(n+5),String(ans-5),String(n)],0,null,'একই সময় ৫ বার যোগ করো।'); }
+        else if(kind===6){ const ans=n+10; add(`একটি সংখ্যার সঙ্গে ১০ যোগ করলে ${ans} হয়। সংখ্যাটি কত?`,[String(n),String(ans),String(n-10),String(ans+10)],0,null,'উল্টো করে ১০ বিয়োগ করো।'); }
+        else { const a=n,b=pick([2,3,4,5]); const ans=a+b; add(`${a}টি বই ছিল, আরও ${b}টি এলো। এখন মোট কয়টি বই?`,[String(ans),String(a),String(b),String(ans+1)],0,null,'দুটি সংখ্যা যোগ করো।'); }
+      }
+    }
+
+    if(mode==='hardcore'){
+      const a=[7,9,11,13,15,17,19,21,23,25,27,31,37,41], b=[2,3,4,5,6,7,8,9];
+      for(let i=0;i<120;i++){
+        const x=pick(a), y=pick(b), k=i%6;
+        if(k===0){ const ans=x*y; add(`${x} × ${y} + 0 = কত?`,[String(ans),String(ans+y),String(ans-y),String(x+y)],0,'প্রথমে গুণ করো।','গুণের ফলই উত্তর।'); }
+        if(k===1){ const ans=x+y; add(`${x} + ${y} × 1 = কত?`,[String(ans),String(x*y),String(x+y+1),String(x)],0,'গুণের পর যোগ করো।','সঠিক হিসাব করলে '+ans+'।'); }
+        if(k===2){ const ans=x*x; add(`${x}² এর মান কত?`,[String(ans),String(x*2),String(x+x+1),String(ans+1)],0,'একই সংখ্যাকে নিজের সঙ্গে গুণ করো।','বর্গ মানে সংখ্যাটিকে নিজে দিয়ে গুণ করা।'); }
+        if(k===3){ const ans=x*3-y; add(`${x} × 3 − ${y} = কত?`,[String(ans),String(x*3+y),String(x-y),String(ans+3)],0,'আগে গুণ, পরে বিয়োগ।','ধাপে ধাপে হিসাব করো।'); }
+        if(k===4){ const ans=x+y*2; add(`${x} + ${y} × 2 = কত?`,[String(ans),String((x+y)*2),String(x+y),String(ans+2)],0,'গুণের অগ্রাধিকার মনে রাখো।','আগে ${y}×2, তারপর '+x+' যোগ করতে হবে।'); }
+        if(k===5){ const ans=x*4+y; add(`${x} × 4 + ${y} = কত?`,[String(ans),String(x*4-y),String(x+y),String(ans-4)],0,'প্রথমে ৪ দিয়ে গুণ করো।','হিসাবের ফল হলো '+ans+'।'); }
+      }
+    }
+
+    if(mode==='puzzle'){
+      const puzzles=[
+        ['আমার শহর আছে কিন্তু ঘর নেই, পাহাড় আছে কিন্তু গাছ নেই। আমি কী?',['মানচিত্র','আয়না','ঘড়ি','বই'],0],
+        ['যত বেশি তুমি নাও, তত বেশি রেখে যাও। আমি কী?',['পদচিহ্ন','ছায়া','বাতাস','আলো'],0],
+        ['আমার মুখ আছে কিন্তু কথা বলি না, হাত আছে কিন্তু ধরতে পারি না। আমি কী?',['ঘড়ি','চেয়ার','মানচিত্র','জুতা'],0],
+        ['আমাকে ভাঙলে শব্দ হয় না, কিন্তু আমি ভাঙলে মানুষ খুশি হতে পারে। আমি কী?',['রেকর্ড','ডিম','নীরবতা','প্রতিশ্রুতি'],0],
+        ['আমি যত শুকাই, তত ভিজি। আমি কী?',['তোয়ালে','মাটি','কাগজ','বালি'],0],
+        ['আমার চাবি আছে কিন্তু তালা নেই, স্পেস আছে কিন্তু ঘর নেই। আমি কী?',['কীবোর্ড','মানচিত্র','বই','গাড়ি'],0],
+        ['আমি সামনে থাকি কিন্তু কখনো দেখা যায় না। আমি কী?',['ভবিষ্যৎ','অতীত','ছায়া','আয়না'],0],
+        ['আমার পা নেই কিন্তু আমি দৌড়াই। মুখ নেই কিন্তু শব্দ করি। আমি কী?',['নদী','চেয়ার','বই','পাথর'],0]
+      ];
+      for(let i=0;i<80;i++){ const q=pick(puzzles); const wraps=['ধাঁধা','একটি ধাঁধা','আজকের ধাঁধা','টাওয়ারের ধাঁধা','প্রহরীর ধাঁধা','মাথা খাটানোর ধাঁধা','রহস্যের ধাঁধা','চ্যালেঞ্জ ধাঁধা','গোপন ধাঁধা','শেষ দরজার ধাঁধা']; add(`${wraps[i%wraps.length]}: ${q[0]}`,q[1],q[2],'শব্দগুলোর আক্ষরিক অর্থের বাইরে ভাবো।','ধাঁধার সূত্রগুলো মিলিয়ে উত্তর বের করা যায়।'); }
+    }
+
     if(mode==='age'){
-      return shuffleQuestion({question:`পরিপক্বতা প্রশ্ন #${n}: হঠাৎ একটি জরুরি সিদ্ধান্ত নিতে হলে তুমি কী করবে?`,options:['তথ্য জেনে তারপর সিদ্ধান্ত নেব','তাড়াহুড়ো করে সিদ্ধান্ত নেব','অন্যের কথা না শুনে সিদ্ধান্ত নেব','কোনো সিদ্ধান্ত নেব না'],ageWeights:[55,10,18,20],hint:null,reveal:'তথ্য নিয়ে ভেবে সিদ্ধান্ত নেওয়া সাধারণত বেশি পরিণত পদ্ধতি।'});
+      const situations=[
+        ['মাসের শেষে টাকা কমে গেছে। প্রথমে কী করবে?',['খরচের তালিকা দেখে অপ্রয়োজনীয় খরচ কমাব','আরও ধার নেব','সবকিছু উপেক্ষা করব','একদিনে সব খরচ করব'],[55,10,25,8]],
+        ['বন্ধু ব্যক্তিগত কথা অন্যকে বলে দিয়েছে। কী করা ভালো?',['শান্তভাবে কারণ জিজ্ঞেস করে সীমা পরিষ্কার করব','প্রতিশোধ নেব','সবার সামনে অপমান করব','কিছু না বলে রাগ জমাব'],[55,8,5,25]],
+        ['কাজের সময় কম। কীভাবে শুরু করবে?',['জরুরি কাজ আগে ঠিক করব','ফোন দেখব','সব কাজ একসাথে শুরু করব','কাজ ফেলে রাখব'],[55,10,25,8]],
+        ['ভুল করে কারও ক্ষতি করলে কী করবে?',['ভুল স্বীকার করে সমাধান করার চেষ্টা করব','লুকিয়ে রাখব','অন্যকে দোষ দেব','চুপ থাকব'],[60,8,5,20]],
+        ['কোনো বড় কেনাকাটার আগে কী করা ভালো?',['প্রয়োজন, দাম ও বাজেট তুলনা করব','সাথে সাথে কিনব','বন্ধু কিনেছে তাই কিনব','ধার করে কিনব'],[60,10,15,5]],
+        ['দুইজনের মতভেদ হলে কী করা বেশি পরিণত?',['দুজনের কথা শুনে সমাধান খোঁজা','জোর করে নিজের কথা চাপানো','রাগ করে চলে যাওয়া','অন্যকে দোষ দেওয়া'],[60,10,12,8]]
+      ];
+      for(let i=0;i<70;i++){ const q=pick(situations); add(`${q[0]} — তোমার সিদ্ধান্ত কী?`,q[1],null,null,'তোমার পছন্দ তোমার সিদ্ধান্ত নেওয়ার ধরন সম্পর্কে একটি ইঙ্গিত দেয়।',{ageWeights:q[2]}); }
     }
+
     if(mode==='love'){
-      return shuffleQuestion({question:`ভালোবাসার প্রশ্ন #${n}: সঙ্গী মন খারাপ করলে তুমি কীভাবে পাশে থাকবে?`,options:['মন দিয়ে শুনব','বিষয়টি এড়িয়ে যাব','হাসাহাসি করব','রাগ দেখাব'],loveWeights:[10,3,1,2],hint:null,reveal:'মন দিয়ে শোনা ও পাশে থাকা যত্নের গুরুত্বপূর্ণ প্রকাশ।'});
+      const situations=[
+        ['সঙ্গীর মন খারাপ হলে তুমি কী করবে?',['মন দিয়ে শুনব','বিষয়টি এড়িয়ে যাব','মজা করে উড়িয়ে দেব','রাগ দেখাব'],[10,3,4,1]],
+        ['সঙ্গী গুরুত্বপূর্ণ কিছু বলছে। তুমি কী করবে?',['মনোযোগ দিয়ে শুনব','ফোন দেখব','বিষয় বদলে দেব','মাঝে মাঝে শুনব'],[10,2,1,5]],
+        ['দুজনের মধ্যে ভুল বোঝাবুঝি হলে?',['শান্তভাবে কথা বলে পরিষ্কার করব','চুপ করে থাকব','অভিযোগ করব','রাগ করে চলে যাব'],[10,4,3,1]],
+        ['সঙ্গী একটি কঠিন দিন পার করেছে। কীভাবে পাশে থাকবে?',['তার কথা শুনে পাশে থাকব','তাকে একা রেখে দেব','বিষয়টি নিয়ে হাসব','নিজের কথাই বলব'],[10,2,1,4]],
+        ['সঙ্গীর সাফল্যে তুমি কী করবে?',['আন্তরিকভাবে অভিনন্দন জানাব','তুলনা করব','বিষয় বদলাব','হিংসে দেখাব'],[10,3,2,1]],
+        ['ঝগড়ার পর সম্পর্ক ঠিক করতে কী বেশি সাহায্য করে?',['দুজনের কথা শুনে সমাধান করা','কে জিতল তা ঠিক করা','চুপচাপ থাকা','পুরোনো ভুল টেনে আনা'],[10,2,4,1]]
+      ];
+      for(let i=0;i<70;i++){ const q=pick(situations); add(`${q[0]}${i%7===0?'':' আজকের পরিস্থিতিতে'}`,q[1],null,null,'সম্পর্কে যত্ন, সম্মান ও যোগাযোগ গুরুত্বপূর্ণ।',{loveWeights:q[2]}); }
     }
-    const t=templates[mode];
-    if(!t) return null;
-    return shuffleQuestion({question:t[0],options:t[1],correctIndex:t[2],hint:'বিকল্পগুলো ভালো করে ভেবে দেখো।',reveal:'সঠিক উত্তরটি প্রশ্নের তথ্য থেকেই বের করা যায়।'});
+
+    if(!out.length) return null;
+    return shuffleQuestion(pick(out));
   }
 
   async function apiGenerateQuestion(mode, usedList){
     const usedNorm=usedList.map(normQ);
-    // Try the local generator first. This is instant and works reliably on
-    // GitHub Pages without exposing an Anthropic API key in the browser.
-    let q=autoQuestion(mode, usedNorm);
-    if(!q) q=makeVariantQuestion(mode, usedNorm);
-    if(!q) throw new Error('question-pool-exhausted');
-    return q;
+    // Build a fresh candidate set on every request. This means the first
+    // few questions are not locked to the same 2/5/10 items, and after the
+    // base questions are used, hundreds of parameterized combinations remain.
+    const candidates=[];
+    const seen=new Set(usedNorm);
+    for(let i=0;i<120;i++){
+      const q=makeVariantQuestion(mode, usedNorm);
+      if(q && !seen.has(normQ(q.question)) && !candidates.some(x=>normQ(x.question)===normQ(q.question))){
+        candidates.push(q);
+        if(candidates.length>=40) break;
+      }
+    }
+    // Keep the original curated pool available too, but only if it has not
+    // already been played. Random choice across both sources prevents the
+    // game from feeling like it is replaying a fixed sequence.
+    const base=AUTO[mode]||[];
+    for(const x of base){
+      if(!seen.has(normQ(x[0]))){
+        const q={question:x[0], options:x[1], correctIndex:null, hint:null, reveal:x[3]||null};
+        if(mode==='age') q.ageWeights=x[2];
+        else if(mode==='love') q.loveWeights=x[2];
+        else if(mode!=='angry'){ q.correctIndex=x[2]; q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।'; }
+        candidates.push(shuffleQuestion(q));
+      }
+    }
+    if(!candidates.length) throw new Error('question-pool-exhausted');
+    return pick(candidates);
   }
 
   /* ================= screens ================= */
@@ -1033,8 +1149,20 @@
       pendingChoice=null; localAnsweredThisRound=false; lastMPRenderSignature='';
       render();
       $('home-error').textContent='উত্তর পাঠানো যায়নি। আবার চেষ্টা করো।';
-    }else if(ok && room && room.round===roundAtClick){
-      if(pendingChoice===idx) pendingChoice=null;
+      return;
+    }
+    // Clear the temporary local choice only after Firebase has accepted it.
+    // Keep the rendered answer locked while the host checks the round.
+    if(ok && room && room.round===roundAtClick && pendingChoice===idx){
+      pendingChoice=null;
+      lastMPRenderSignature='';
+      render();
+      // If this player is the host, check immediately instead of waiting for
+      // the next 1.2s polling tick. This removes the noticeable next-question delay.
+      if(isHost && !hostAuthorityBusy) {
+        await hostAuthorityCheck();
+        render();
+      }
     }
   }
 
@@ -1100,6 +1228,8 @@
           });
           fresh.phase='reveal'; fresh.phaseStartedAt=Date.now();
           await saveRoom(fresh); room=fresh;
+          lastMPRenderSignature='';
+          render();
         }
       }
     } else if(room.phase==='reveal' && elapsed>REVEAL_MS){
@@ -1109,13 +1239,30 @@
         if(isDone){ fresh.phase='end'; await saveRoom(fresh); room=fresh; }
         else {
           fresh.phase='loading'; await saveRoom(fresh); room=fresh; render();
-          const q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]);
+          let q=null;
+          try{ q = await apiGenerateQuestion(fresh.mode, fresh.usedQuestions||[]); }
+          catch(e){
+            console.error('Question generation failed',e);
+            // Never leave the multiplayer game stuck in loading. Try a curated
+            // unused question as a final local fallback.
+            const used=new Set((fresh.usedQuestions||[]).map(normQ));
+            const base=AUTO[fresh.mode]||[];
+            const candidates=base.filter(x=>!used.has(normQ(x[0])));
+            if(candidates.length){
+              const x=candidates[Math.floor(Math.random()*candidates.length)];
+              q={question:x[0],options:x[1],correctIndex:null,hint:null,reveal:x[3]||null};
+              if(fresh.mode==='age') q.ageWeights=x[2];
+              else if(fresh.mode==='love') q.loveWeights=x[2];
+              else if(fresh.mode!=='angry'){ q.correctIndex=x[2]; q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।'; }
+              q=shuffleQuestion(q);
+            }
+          }
           const fresh2 = await loadRoom(roomCode);
-          if(fresh2 && fresh2.phase==='loading'){
+          if(fresh2 && fresh2.phase==='loading' && q){
             fresh2.usedQuestions=(fresh2.usedQuestions||[]).concat([q.question]);
             fresh2.currentQuestion=q; fresh2.round=fresh.round+1; fresh2.phase='question'; fresh2.phaseStartedAt=Date.now();
             Object.values(fresh2.players).forEach(p=>{ p.answered=false; p.choice=null; });
-            await saveRoom(fresh2); room=fresh2;
+            await saveRoom(fresh2); room=fresh2; lastMPRenderSignature='';
           }
         }
       }
