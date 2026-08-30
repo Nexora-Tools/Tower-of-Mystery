@@ -926,57 +926,111 @@
     }
     return null;
   }
-async function apiGenerateQuestion(mode, usedList = []) {
-  const WORKER_URL =
-    "https://tower-ai.ictworld1400.workers.dev/generate";
+async function apiGenerateQuestion(mode, usedList){
+  const used = Array.isArray(usedList) ? usedList : [];
 
-  const previousQuestions = Array.isArray(usedList)
-    ? usedList.slice(-100)
-    : [];
+  try {
+    const response = await fetch(
+      "https://tower-ai.ictworld1400.workers.dev/generate",
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          mode: mode,
+          previousQuestions: used.slice(-100)
+        })
+      }
+    );
 
-  const response = await fetch(WORKER_URL, {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      mode: mode,
-      previousQuestions: previousQuestions
-    })
-  });
+    if (!response.ok) {
+      throw new Error("AI Worker HTTP " + response.status);
+    }
 
-  if (!response.ok) {
-    throw new Error("AI Worker HTTP " + response.status);
+    const data = await response.json();
+
+    if (!data || !data.ok || !Array.isArray(data.questions)) {
+      throw new Error("Invalid AI Worker response");
+    }
+
+    const usedSet = new Set(used.map(normQ));
+
+    const fresh = data.questions.filter(q =>
+      q &&
+      typeof q.question === "string" &&
+      Array.isArray(q.options) &&
+      q.options.length === 4 &&
+      !usedSet.has(normQ(q.question))
+    );
+
+    if (!fresh.length) {
+      throw new Error("AI returned no fresh questions");
+    }
+
+    // Pick one question randomly from the 10-question AI batch.
+    const q = fresh[Math.floor(Math.random() * fresh.length)];
+
+    // Make sure all options are different.
+    const optionSet = new Set(
+      q.options.map(x => String(x).trim().toLowerCase())
+    );
+
+    if (optionSet.size !== 4) {
+      throw new Error("AI returned duplicate options");
+    }
+
+    // Preserve special-mode fields.
+    const result = {
+      question: q.question.trim(),
+      options: q.options.map(x => String(x).trim()),
+      correctIndex:
+        Number.isInteger(q.correctIndex) &&
+        q.correctIndex >= 0 &&
+        q.correctIndex <= 3
+          ? q.correctIndex
+          : null,
+      hint: typeof q.hint === "string" ? q.hint : null,
+      reveal: typeof q.reveal === "string" ? q.reveal : null
+    };
+
+    if (Array.isArray(q.ageWeights)) {
+      result.ageWeights = q.ageWeights;
+    }
+
+    if (Array.isArray(q.loveWeights)) {
+      result.loveWeights = q.loveWeights;
+    }
+
+    // Shuffle options while keeping correctIndex synchronized.
+    return shuffleQuestion(result);
+
+  } catch (error) {
+    console.warn("AI generation failed:", error);
+
+    // IMPORTANT:
+    // Keep the game's existing local generator as fallback.
+    const usedNorm = used.map(normQ);
+
+    try {
+      const fallback = makeVariantQuestion(mode, usedNorm);
+
+      if (fallback) {
+        return shuffleQuestion(fallback);
+      }
+    } catch (fallbackError) {
+      console.warn("Local fallback failed:", fallbackError);
+    }
+
+    // Final existing emergency system.
+    const emergency = makeEmergencyQuestion(mode, used);
+
+    if (emergency) {
+      return emergency;
+    }
+
+    throw error;
   }
-
-  const data = await response.json();
-
-  if (!data.ok || !Array.isArray(data.questions)) {
-    throw new Error(data.error || "Invalid AI response");
-  }
-
-  if (data.questions.length === 0) {
-    throw new Error("AI returned no questions");
-  }
-
-  const q =
-    data.questions[
-      Math.floor(Math.random() * data.questions.length)
-    ];
-
-  if (
-    !q ||
-    typeof q.question !== "string" ||
-    !Array.isArray(q.options) ||
-    q.options.length !== 4 ||
-    !Number.isInteger(q.correctIndex) ||
-    q.correctIndex < 0 ||
-    q.correctIndex > 3
-  ) {
-    throw new Error("Invalid question received from AI");
-  }
-
-  return shuffleQuestion(q);
 }
   /* ================= SOLO FLOW ================= */
   $('btn-solo').onclick = ()=>{
