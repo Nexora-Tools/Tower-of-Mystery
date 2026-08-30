@@ -777,261 +777,110 @@
     return same;
   }
 
-  
-    const used=new Set((usedList||[]).map(normQ));
-    const candidates=[];
-    const candidateKeys=new Set(used);
 
-    // Ask the existing local generator for many independent candidates.
-    // Passing the growing candidate list prevents it from returning the
-    // same question repeatedly during this collection phase.
-    for(let i=0;i<320;i++){
-      try{
-        const q=makeVariantQuestion(mode,[...candidateKeys]);
-        if(!q) continue;
-        const key=normQ(q.question);
-        if(candidateKeys.has(key)) continue;
-        candidateKeys.add(key);
-        candidates.push(q);
-      }catch(e){}
-    }
-
-    // Add every static question that has not already been used.
-    for(const x of (AUTO[mode]||[])){
-      const key=normQ(x[0]);
-      if(candidateKeys.has(key)) continue;
-      const q={
-        question:x[0],
-        options:x[1].slice(),
-        correctIndex:null,
-        hint:null,
-        reveal:x[3]||null
-      };
-      if(mode==='age') q.ageWeights=x[2];
-      else if(mode==='love') q.loveWeights=x[2];
-      else if(mode!=='angry'){
-        q.correctIndex=x[2];
-        q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।';
-      }
-      candidates.push(q);
-      candidateKeys.add(key);
-    }
-
-    if(!candidates.length) throw new Error('question-pool-exhausted');
-
-    // Prefer candidates whose option set is different from the recent rounds.
-    let best=null, bestScore=Infinity;
-    const recent=generatedOptionHistory.slice(-6);
-
-    for(const q0 of candidates){
-      const q=shuffleQuestion(q0);
-      const key=normQ(q.question);
-      if(used.has(key)) continue;
-
-      let score=0;
-      for(const old of recent) score += optionSimilarity(q,old)*10;
-      // Penalize nearly identical wording as well.
-      for(const old of recent){
-        const a=key, b=normQ(old.question);
-        if(a===b) score+=1000;
-        else{
-          const aw=a.split(' '), bw=new Set(b.split(' '));
-          let common=0;
-          aw.forEach(w=>{if(w.length>2 && bw.has(w)) common++;});
-          if(common>=Math.min(5,aw.length)) score+=common;
-        }
-      }
-
-      // Small random component prevents deterministic repetition.
-      score += Math.random()*3;
-      if(score<bestScore){
-        bestScore=score;
-        best=q;
-      }
-    }
-
-    if(!best){
-      const fresh=candidates.find(q=>!used.has(normQ(q.question)))||candidates[0];
-      best=shuffleQuestion(fresh);
-    }
-
-    generatedOptionHistory.push(best);
-    if(generatedOptionHistory.length>20) generatedOptionHistory.shift();
-    return best;
-  }
-
-  /* ================= screens ================= */
-  function showScreen(id){
-    ['screen-home','screen-mode','screen-count','screen-lobby','screen-loading','screen-question','screen-reveal','screen-end'].forEach(s=>{
-      $(s).classList.toggle('hidden', s!==id);
-    });
-    $('btn-home').classList.toggle('hidden', id==='screen-home');
-  }
-
-  $('btn-home').onclick = ()=>{ hardReset(); };
-  function hardReset(){
-    generatedOptionHistory=[];
-    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; localAnswerRound=-1; localAnswerChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
-    selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
-    $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
-    showScreen('screen-home');
-  }
-
-  /* ---------- mode grid builder (shared by solo + lobby) ---------- */
-  function buildModeGrid(container, opts){
-    container.innerHTML='';
-    const { selectedId, playerCount, onSelect } = opts;
-    MODES.forEach(m=>{
-      const disabled = m.duoOnly && playerCount!==2;
-      const card = document.createElement('div');
-      card.className = 'modecard' + (m.id===selectedId?' selected':'') + (disabled?' disabled':'');
-      card.innerHTML = `<span class="micon">${m.icon}</span><span class="mlabel">${m.label}</span>${m.duoOnly?'<span class="mnote">শুধু ২ জনের জন্য</span>':''}`;
-      if(!disabled) card.onclick = ()=> onSelect(m.id);
-      container.appendChild(card);
-    });
-  }
-  function buildCountRow(container, opts){
-    container.innerHTML='';
-    const { selectedVal, onSelect } = opts;
-    [10,20,30,'inf'].forEach(v=>{
-      const b = document.createElement('div');
-      b.className = 'countbtn' + (selectedVal===v?' selected':'');
-      b.innerHTML = v==='inf' ? `∞<small>না বলা পর্যন্ত</small>` : `${v}<small>প্রশ্ন</small>`;
-      b.onclick = ()=> onSelect(v);
-      container.appendChild(b);
-    });
-  }
-
-  // Guaranteed-unused local safety net. Used only if the normal generator
-  // cannot produce another question.
-  function makeEmergencyQuestion(mode, usedList){
-    const used=new Set((usedList||[]).map(normQ));
-    const templates={
-      funny:()=>{ const a=pick(['রোবট','বিড়াল','এলিয়েন','মশা','পেঙ্গুইন']); return {
-        question:`যদি ${a} তোমার শিক্ষক হতো, প্রথমে কী করতে পারে?`,
-        options:['অদ্ভুত নিয়ম বানাতে পারে','সূর্য বন্ধ করতে পারে','সমুদ্র সরাতে পারে','চাঁদ লুকাতে পারে'],correctIndex:0}; },
-      angry:()=>({question:`রাগী প্রশ্ন: ${pick([5,7,9,11])} এর সঙ্গে ১ যোগ করলে কত?`,options:['৬','৮','১০','১২'],correctIndex:0}),
-      baby:()=>({question:`সহজ প্রশ্ন: ২ + ${pick([1,2,3])} = কত?`,options:['২','৩','৪','৫'],correctIndex:0}),
-      iq:()=>{const a=pick([3,4,5,6,7]),b=pick([2,3,4]);const ans=a+b;return {question:`${a}টি বলের সঙ্গে আরও ${b}টি যোগ করলে মোট কত?`,options:[String(ans),String(ans+1),String(ans+2),String(a)],correctIndex:0};},
-      hardcore:()=>{const a=pick([7,9,11,13,15]),b=pick([4,5,6]);const ans=a*b;return {question:`${a} × ${b} = কত?`,options:[String(ans),String(ans+b),String(ans-b),String(a+b)],correctIndex:0};},
-      puzzle:()=>({question:`কোন জিনিসটি যত বেশি নাও, তত বেশি রেখে যাও?`,options:['পদচিহ্ন','ছায়া','বাতাস','আলো'],correctIndex:0}),
-      age:()=>({question:`কোনো বড় সিদ্ধান্তের আগে কী করা সবচেয়ে পরিণত কাজ?`,options:['তথ্য যাচাই ও সময় নিয়ে ভাবা','তাড়াহুড়া করে সিদ্ধান্ত নেওয়া','অন্যকে দোষ দেওয়া','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,ageWeights:[10,3,2,1]}),
-      love:()=>({question:`সম্পর্কে মতভেদ হলে কোন আচরণটি সবচেয়ে স্বাস্থ্যকর?`,options:['শান্তভাবে কথা বলা','চুপ করে শাস্তি দেওয়া','অপমান করা','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,loveWeights:[10,3,1,2]})
-    };
-    function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
-    for(let i=0;i<500;i++){
-      const q=(templates[mode]||templates.iq)();
-      q.question += ` • ${i+1}`;
-      if(!used.has(normQ(q.question))) return shuffleQuestion(q);
-    }
-    return null;
-  }
+  // The local generator above is the fallback used by the AI question generator.
 async function apiGenerateQuestion(mode, usedList){
-  const used = Array.isArray(usedList) ? usedList : [];
-
-  try {
-    const response = await fetch(
-      "https://tower-ai.ictworld1400.workers.dev/generate",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          mode: mode,
-          previousQuestions: used.slice(-100)
-        })
-      }
-    );
-
-    if (!response.ok) {
-      throw new Error("AI Worker HTTP " + response.status);
-    }
-
-    const data = await response.json();
-
-    if (!data || !data.ok || !Array.isArray(data.questions)) {
-      throw new Error("Invalid AI Worker response");
-    }
-
+    const used = Array.isArray(usedList) ? usedList : [];
     const usedSet = new Set(used.map(normQ));
 
-    const fresh = data.questions.filter(q =>
-      q &&
-      typeof q.question === "string" &&
-      Array.isArray(q.options) &&
-      q.options.length === 4 &&
-      !usedSet.has(normQ(q.question))
-    );
+    // Ask the Cloudflare Worker for a batch. A timeout prevents the game
+    // from getting stuck on the loading screen if an AI provider is slow.
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), 12000);
 
-    if (!fresh.length) {
-      throw new Error("AI returned no fresh questions");
-    }
+    try{
+      const response = await fetch(
+        "https://tower-ai.ictworld1400.workers.dev/generate",
+        {
+          method:"POST",
+          headers:{"Content-Type":"application/json"},
+          body:JSON.stringify({
+            mode,
+            previousQuestions:used.slice(-100)
+          }),
+          signal:controller.signal,
+          cache:"no-store"
+        }
+      );
 
-    // Pick one question randomly from the 10-question AI batch.
-    const q = fresh[Math.floor(Math.random() * fresh.length)];
+      if(!response.ok) throw new Error("AI Worker HTTP "+response.status);
 
-    // Make sure all options are different.
-    const optionSet = new Set(
-      q.options.map(x => String(x).trim().toLowerCase())
-    );
-
-    if (optionSet.size !== 4) {
-      throw new Error("AI returned duplicate options");
-    }
-
-    // Preserve special-mode fields.
-    const result = {
-      question: q.question.trim(),
-      options: q.options.map(x => String(x).trim()),
-      correctIndex:
-        Number.isInteger(q.correctIndex) &&
-        q.correctIndex >= 0 &&
-        q.correctIndex <= 3
-          ? q.correctIndex
-          : null,
-      hint: typeof q.hint === "string" ? q.hint : null,
-      reveal: typeof q.reveal === "string" ? q.reveal : null
-    };
-
-    if (Array.isArray(q.ageWeights)) {
-      result.ageWeights = q.ageWeights;
-    }
-
-    if (Array.isArray(q.loveWeights)) {
-      result.loveWeights = q.loveWeights;
-    }
-
-    // Shuffle options while keeping correctIndex synchronized.
-    return shuffleQuestion(result);
-
-  } catch (error) {
-    console.warn("AI generation failed:", error);
-
-    // IMPORTANT:
-    // Keep the game's existing local generator as fallback.
-    const usedNorm = used.map(normQ);
-
-    try {
-      const fallback = makeVariantQuestion(mode, usedNorm);
-
-      if (fallback) {
-        return shuffleQuestion(fallback);
+      const data = await response.json();
+      if(!data || !data.ok || !Array.isArray(data.questions)){
+        throw new Error("Invalid AI Worker response");
       }
-    } catch (fallbackError) {
-      console.warn("Local fallback failed:", fallbackError);
+
+      // Only accept fresh, structurally valid questions.
+      const candidates = data.questions.filter(q=>{
+        if(!q || typeof q.question!=="string") return false;
+        if(!Array.isArray(q.options) || q.options.length!==4) return false;
+
+        const options = q.options.map(x=>String(x).trim());
+        if(options.some(x=>!x)) return false;
+        if(new Set(options.map(normQ)).size!==4) return false;
+        if(usedSet.has(normQ(q.question))) return false;
+
+        const cfg = modeCfg(mode);
+        if(cfg && cfg.needsCorrect){
+          if(!Number.isInteger(q.correctIndex) ||
+             q.correctIndex<0 || q.correctIndex>3) return false;
+        }
+
+        return true;
+      });
+
+      if(!candidates.length) throw new Error("No fresh valid AI question");
+
+      const q = candidates[Math.floor(Math.random()*candidates.length)];
+
+      const result = {
+        question:q.question.trim(),
+        options:q.options.map(x=>String(x).trim()),
+        correctIndex:Number.isInteger(q.correctIndex) ? q.correctIndex : null,
+        hint:typeof q.hint==="string" ? q.hint : null,
+        reveal:typeof q.reveal==="string" ? q.reveal : null
+      };
+
+      // The Worker can supply these fields for the special modes.
+      // If an older Worker response does not include them, create safe
+      // defaults so the game never crashes.
+      if(mode==="age"){
+        result.correctIndex=null;
+        result.ageWeights=Array.isArray(q.ageWeights) && q.ageWeights.length===4
+          ? q.ageWeights.map(Number)
+          : [25,25,25,25];
+      }else if(mode==="love"){
+        result.correctIndex=null;
+        result.loveWeights=Array.isArray(q.loveWeights) && q.loveWeights.length===4
+          ? q.loveWeights.map(Number)
+          : [5,5,5,5];
+      }else if(mode==="angry"){
+        result.correctIndex=null;
+      }
+
+      return shuffleQuestion(result);
+
+    }catch(error){
+      console.warn("AI generation failed, using local generator:", error);
+
+      // AI failure must NEVER break the game. Use the existing large
+      // local generator, then the emergency generator as final fallback.
+      try{
+        const local = makeVariantQuestion(mode, used.map(normQ));
+        if(local) return local;
+      }catch(e){
+        console.warn("Local generator failed:", e);
+      }
+
+      const emergency = makeEmergencyQuestion(mode, used);
+      if(emergency) return emergency;
+
+      throw error;
+    }finally{
+      clearTimeout(timeout);
     }
-
-    // Final existing emergency system.
-    const emergency = makeEmergencyQuestion(mode, used);
-
-    if (emergency) {
-      return emergency;
-    }
-
-    throw error;
   }
-}
+
   /* ================= SOLO FLOW ================= */
   $('btn-solo').onclick = ()=>{
     soloMode = true; selectedMode=null; selectedCount=null;
