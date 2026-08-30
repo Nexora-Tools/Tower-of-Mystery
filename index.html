@@ -777,7 +777,7 @@
     return same;
   }
 
-  async function apiGenerateQuestion(mode, usedList){
+  
     const used=new Set((usedList||[]).map(normQ));
     const candidates=[];
     const candidateKeys=new Set(used);
@@ -926,7 +926,58 @@
     }
     return null;
   }
+async function apiGenerateQuestion(mode, usedList = []) {
+  const WORKER_URL =
+    "https://tower-ai.ictworld1400.workers.dev/generate";
 
+  const previousQuestions = Array.isArray(usedList)
+    ? usedList.slice(-100)
+    : [];
+
+  const response = await fetch(WORKER_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      mode: mode,
+      previousQuestions: previousQuestions
+    })
+  });
+
+  if (!response.ok) {
+    throw new Error("AI Worker HTTP " + response.status);
+  }
+
+  const data = await response.json();
+
+  if (!data.ok || !Array.isArray(data.questions)) {
+    throw new Error(data.error || "Invalid AI response");
+  }
+
+  if (data.questions.length === 0) {
+    throw new Error("AI returned no questions");
+  }
+
+  const q =
+    data.questions[
+      Math.floor(Math.random() * data.questions.length)
+    ];
+
+  if (
+    !q ||
+    typeof q.question !== "string" ||
+    !Array.isArray(q.options) ||
+    q.options.length !== 4 ||
+    !Number.isInteger(q.correctIndex) ||
+    q.correctIndex < 0 ||
+    q.correctIndex > 3
+  ) {
+    throw new Error("Invalid question received from AI");
+  }
+
+  return shuffleQuestion(q);
+}
   /* ================= SOLO FLOW ================= */
   $('btn-solo').onclick = ()=>{
     soloMode = true; selectedMode=null; selectedCount=null;
