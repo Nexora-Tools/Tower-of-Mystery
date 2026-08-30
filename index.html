@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>টাওয়ারের রহস্য — Mystery-of-Tower</title>
+<title>টাওয়ারের রহস্য — The Enigma Tower</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Cinzel:wght@500;700;900&family=Cinzel+Decorative:wght@700;900&family=Inter:wght@400;500;600;700;800&family=Tiro+Bangla&family=Hind+Siliguri:wght@400;500;600;700;800&display=swap" rel="stylesheet">
 <style>
@@ -376,7 +376,13 @@
   // The database is configured in Firebase Console. This URL is the database
   // shown in the user's Firebase project. Test-mode rules currently allow
   // unauthenticated read/write for development.
-  const FIREBASE_DB_URL = 'https://mystery-of-tower-b26ff-default-rtdb.firebaseio.com';
+  const FIREBASE_DB_URLS = [
+    'https://mystery-of-tower-b26ff-default-rtdb.firebaseio.com',
+    'https://mystery-of-tower-b26ff-default-rtdb.asia-southeast1.firebasedatabase.app',
+    'https://mystery-of-tower-b26ff-default-rtdb.us-central1.firebasedatabase.app',
+    'https://mystery-of-tower-b26ff-default-rtdb.europe-west1.firebasedatabase.app'
+  ];
+  let FIREBASE_DB_URL = FIREBASE_DB_URLS[0];
   const STORAGE_OK = true;
   const QUESTION_MS = 22000, REVEAL_MS = 1400;
 
@@ -469,11 +475,35 @@
   // Claude-only window.storage warning is intentionally disabled.
   $('storage-banner').classList.add('hidden');
 
+  function dbBase(){
+    return FIREBASE_DB_URL.replace(/\/$/, '');
+  }
   function roomUrl(code){
-    return FIREBASE_DB_URL.replace(/\/$/, '') + '/rooms/' + encodeURIComponent(code) + '.json';
+    return dbBase() + '/rooms/' + encodeURIComponent(code) + '.json';
   }
   function roundAnswersUrl(code, round){
-    return FIREBASE_DB_URL.replace(/\/$/,'') + '/rooms/' + encodeURIComponent(code) + '/answers/' + encodeURIComponent(String(round)) + '.json';
+    return dbBase() + '/rooms/' + encodeURIComponent(code) + '/answers/' + encodeURIComponent(String(round)) + '.json';
+  }
+
+  async function selectFirebaseDatabase(){
+    let lastError = null;
+    for(const candidate of FIREBASE_DB_URLS){
+      try{
+        const response = await firebaseFetch(candidate.replace(/\/$/,'') + '/.json', {
+          method:'GET',
+          timeoutMs:5000
+        });
+        // A successful response, including an empty database (null), proves
+        // that this is a reachable Realtime Database endpoint.
+        FIREBASE_DB_URL = candidate;
+        console.info('Firebase database selected:', candidate);
+        return true;
+      }catch(e){
+        lastError = e;
+      }
+    }
+    console.warn('No Firebase database endpoint could be reached:', lastError);
+    return false;
   }
   async function loadRoundAnswers(code, round){
     try{
@@ -485,7 +515,7 @@
   }
   async function firebaseFetch(url, options={}){
     const controller = new AbortController();
-    const timeout = setTimeout(()=>controller.abort(), 7000);
+    const timeout = setTimeout(()=>controller.abort(), options.timeoutMs || 7000);
     try{
       const response = await fetch(url, { ...options, signal:controller.signal,
         headers:{'Content-Type':'application/json', ...(options.headers||{})},
@@ -502,8 +532,10 @@
     }finally{ clearTimeout(timeout); }
   }
   // Quick startup check. It does not create any database data.
-  firebaseFetch(FIREBASE_DB_URL.replace(/\/$/,'') + '/.json', {method:'GET'})
-    .catch(e=>console.warn('Firebase startup check failed:', e));
+  // This also fixes deployments where Firebase assigned the database a
+  // regional *.firebasedatabase.app hostname instead of the legacy
+  // *.firebaseio.com hostname.
+  let firebaseReadyPromise = selectFirebaseDatabase();
 
   /* ================= question generation ================= */
   function normQ(s){ return (s||'').trim().toLowerCase().replace(/\s+/g,' '); }
@@ -777,135 +809,305 @@
     return same;
   }
 
+  /* ===== TOWER MYSTERY AI CONNECTION =====
+     Game -> Cloudflare Worker -> AI provider.
+     API keys remain private in the Worker.
+  */
+  const TOWER_AI_WORKER_URL = "https://tower-ai.ictworld1400.workers.dev/generate";
 
-  // Final emergency fallback. This function is intentionally self-contained so
-  // an AI/API failure can never break Solo or Room mode.
-  function makeEmergencyQuestion(mode, usedList=[]){
-    const usedSet = new Set((Array.isArray(usedList) ? usedList : []).map(normQ));
-    const pool = AUTO[mode] || [];
-    const candidates = pool.filter(x => Array.isArray(x) && x[0] && !usedSet.has(normQ(x[0])));
-    if(!candidates.length) return null;
-    const x = candidates[Math.floor(Math.random()*candidates.length)];
-    const q = {
-      question: String(x[0]),
-      options: Array.isArray(x[1]) ? x[1].map(String) : [],
-      correctIndex: Number.isInteger(x[2]) ? x[2] : null,
-      hint: x[3] || null,
-      reveal: x[3] || null
-    };
-    if(mode==='age' && Array.isArray(x[2])) {
-      q.correctIndex=null;
-      q.ageWeights=x[2];
-    }
-    if(mode==='love' && Array.isArray(x[2])) {
-      q.correctIndex=null;
-      q.loveWeights=x[2];
-    }
-    if(q.options.length!==4) return null;
-    return shuffleQuestion(q);
-  }
-
-  // The local generator above is the fallback used by the AI question generator.
-async function apiGenerateQuestion(mode, usedList){
-    const used = Array.isArray(usedList) ? usedList : [];
-    const usedSet = new Set(used.map(normQ));
-
-    // Ask the Cloudflare Worker for a batch. A timeout prevents the game
-    // from getting stuck on the loading screen if an AI provider is slow.
+  async function callTowerAI(mode, previousQuestions){
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 12000);
+    const timeout = setTimeout(() => controller.abort(), 15000);
 
     try{
-      const response = await fetch(
-        "https://tower-ai.ictworld1400.workers.dev/generate",
-        {
-          method:"POST",
-          headers:{"Content-Type":"application/json"},
-          body:JSON.stringify({
-            mode,
-            previousQuestions:used.slice(-100)
-          }),
-          signal:controller.signal,
-          cache:"no-store"
-        }
-      );
-
-      if(!response.ok) throw new Error("AI Worker HTTP "+response.status);
-
-      const data = await response.json();
-      if(!data || !data.ok || !Array.isArray(data.questions)){
-        throw new Error("Invalid AI Worker response");
-      }
-
-      // Only accept fresh, structurally valid questions.
-      const candidates = data.questions.filter(q=>{
-        if(!q || typeof q.question!=="string") return false;
-        if(!Array.isArray(q.options) || q.options.length!==4) return false;
-
-        const options = q.options.map(x=>String(x).trim());
-        if(options.some(x=>!x)) return false;
-        if(new Set(options.map(normQ)).size!==4) return false;
-        if(usedSet.has(normQ(q.question))) return false;
-
-        const cfg = modeCfg(mode);
-        if(cfg && cfg.needsCorrect){
-          if(!Number.isInteger(q.correctIndex) ||
-             q.correctIndex<0 || q.correctIndex>3) return false;
-        }
-
-        return true;
+      const response = await fetch(TOWER_AI_WORKER_URL, {
+        method:'POST',
+        headers:{'Content-Type':'application/json'},
+        body:JSON.stringify({
+          mode:mode || 'funny',
+          previousQuestions:Array.isArray(previousQuestions)
+            ? previousQuestions.slice(-100)
+            : []
+        }),
+        signal:controller.signal
       });
 
-      if(!candidates.length) throw new Error("No fresh valid AI question");
-
-      const q = candidates[Math.floor(Math.random()*candidates.length)];
-
-      const result = {
-        question:q.question.trim(),
-        options:q.options.map(x=>String(x).trim()),
-        correctIndex:Number.isInteger(q.correctIndex) ? q.correctIndex : null,
-        hint:typeof q.hint==="string" ? q.hint : null,
-        reveal:typeof q.reveal==="string" ? q.reveal : null
-      };
-
-      // The Worker can supply these fields for the special modes.
-      // If an older Worker response does not include them, create safe
-      // defaults so the game never crashes.
-      if(mode==="age"){
-        result.correctIndex=null;
-        result.ageWeights=Array.isArray(q.ageWeights) && q.ageWeights.length===4
-          ? q.ageWeights.map(Number)
-          : [25,25,25,25];
-      }else if(mode==="love"){
-        result.correctIndex=null;
-        result.loveWeights=Array.isArray(q.loveWeights) && q.loveWeights.length===4
-          ? q.loveWeights.map(Number)
-          : [5,5,5,5];
-      }else if(mode==="angry"){
-        result.correctIndex=null;
+      if(!response.ok){
+        throw new Error(`Tower AI HTTP ${response.status}`);
       }
 
-      return shuffleQuestion(result);
+      const data=await response.json();
 
-    }catch(error){
-      console.warn("AI generation failed, using local generator:", error);
-
-      // AI failure must NEVER break the game. Use the existing large
-      // local generator, then the emergency generator as final fallback.
-      try{
-        const local = makeVariantQuestion(mode, used.map(normQ));
-        if(local) return local;
-      }catch(e){
-        console.warn("Local generator failed:", e);
+      if(!data || data.ok!==true || !Array.isArray(data.questions)){
+        throw new Error(data?.error || 'Invalid Tower AI response');
       }
 
-      const emergency = makeEmergencyQuestion(mode, used);
-      if(emergency) return emergency;
-
-      throw error;
+      return data.questions;
     }finally{
       clearTimeout(timeout);
     }
+  }
+
+  function validateTowerAIQuestion(q){
+    if(!q || typeof q.question!=='string' || !Array.isArray(q.options)) return false;
+    if(q.options.length!==4) return false;
+    if(!Number.isInteger(q.correctIndex) || q.correctIndex<0 || q.correctIndex>3) return false;
+
+    const options=q.options.map(x=>String(x).trim());
+    if(options.some(x=>!x)) return false;
+    if(new Set(options.map(x=>normQ(x))).size!==4) return false;
+
+    return true;
+  }
+
+  /* ===== INSTANT QUESTION QUEUE =====
+     The AI creates a batch of questions in the background. The game consumes
+     those already-created questions instantly. When the queue gets low, the
+     next batch is requested before it is needed.
+  */
+  const towerAIQueues = new Map();
+  const towerAIFetches = new Map();
+
+  function towerAIKey(mode){
+    return String(mode || 'funny');
+  }
+
+  function towerAIValidBatch(raw){
+    if(!Array.isArray(raw)) return [];
+    return raw.filter(validateTowerAIQuestion).map(q=>({
+      question:String(q.question).trim(),
+      options:q.options.map(x=>String(x).trim()),
+      correctIndex:q.correctIndex,
+      hint:typeof q.hint==='string'?q.hint:'',
+      reveal:typeof q.reveal==='string'?q.reveal:''
+    }));
+  }
+
+  function prefetchTowerAI(mode, usedList){
+    const key=towerAIKey(mode);
+    if(towerAIFetches.has(key)) return towerAIFetches.get(key);
+
+    const used=(usedList||[]).slice(-100);
+    const promise=callTowerAI(mode,used)
+      .then(raw=>{
+        const batch=towerAIValidBatch(raw);
+        if(!batch.length) throw new Error('AI returned no valid questions');
+
+        const existing=towerAIQueues.get(key)||[];
+        const existingSet=new Set(existing.map(q=>normQ(q.question)));
+        const usedSet=new Set(used.map(q=>normQ(q)));
+
+        const fresh=batch.filter(q=>
+          !existingSet.has(normQ(q.question)) &&
+          !usedSet.has(normQ(q.question))
+        );
+
+        towerAIQueues.set(key, existing.concat(fresh));
+        return fresh;
+      })
+      .catch(err=>{
+        console.warn('AI background generation failed:',err);
+        return [];
+      })
+      .finally(()=>towerAIFetches.delete(key));
+
+    towerAIFetches.set(key,promise);
+    return promise;
+  }
+
+  async function apiGenerateQuestion(mode, usedList){
+    const key=towerAIKey(mode);
+    const used=(usedList||[]);
+    const usedSet=new Set(used.map(q=>normQ(q)));
+
+    // Remove anything already used from the ready queue.
+    let queue=(towerAIQueues.get(key)||[]).filter(q=>!usedSet.has(normQ(q.question)));
+    towerAIQueues.set(key,queue);
+
+    // Keep the queue filled in the background.
+    if(queue.length<=3){
+      prefetchTowerAI(mode,used);
+    }
+
+    // MAIN FAST PATH: no AI wait.
+    if(queue.length){
+      const q=queue.shift();
+      towerAIQueues.set(key,queue);
+      return q;
+    }
+
+    // Only the very first question needs to wait if the preload hasn't
+    // finished yet. Once the game is running, the queue is kept ahead.
+    try{
+      await prefetchTowerAI(mode,used);
+      queue=(towerAIQueues.get(key)||[]).filter(q=>!usedSet.has(normQ(q.question)));
+      towerAIQueues.set(key,queue);
+
+      if(queue.length){
+        const q=queue.shift();
+        towerAIQueues.set(key,queue);
+
+        // Start another batch immediately for future rounds.
+        if(queue.length<=3) prefetchTowerAI(mode,[...used,q.question]);
+        return q;
+      }
+    }catch(e){
+      console.warn('AI first-question generation failed:',e);
+    }
+
+    // Existing local generator remains the fallback.
+    return await localGenerateQuestion(mode,usedList);
+  }
+
+
+  async function localGenerateQuestion(mode, usedList){
+    const used=new Set((usedList||[]).map(normQ));
+    const candidates=[];
+    const candidateKeys=new Set(used);
+
+    // Ask the existing local generator for many independent candidates.
+    // Passing the growing candidate list prevents it from returning the
+    // same question repeatedly during this collection phase.
+    for(let i=0;i<320;i++){
+      try{
+        const q=makeVariantQuestion(mode,[...candidateKeys]);
+        if(!q) continue;
+        const key=normQ(q.question);
+        if(candidateKeys.has(key)) continue;
+        candidateKeys.add(key);
+        candidates.push(q);
+      }catch(e){}
+    }
+
+    // Add every static question that has not already been used.
+    for(const x of (AUTO[mode]||[])){
+      const key=normQ(x[0]);
+      if(candidateKeys.has(key)) continue;
+      const q={
+        question:x[0],
+        options:x[1].slice(),
+        correctIndex:null,
+        hint:null,
+        reveal:x[3]||null
+      };
+      if(mode==='age') q.ageWeights=x[2];
+      else if(mode==='love') q.loveWeights=x[2];
+      else if(mode!=='angry'){
+        q.correctIndex=x[2];
+        q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।';
+      }
+      candidates.push(q);
+      candidateKeys.add(key);
+    }
+
+    if(!candidates.length) throw new Error('question-pool-exhausted');
+
+    // Prefer candidates whose option set is different from the recent rounds.
+    let best=null, bestScore=Infinity;
+    const recent=generatedOptionHistory.slice(-6);
+
+    for(const q0 of candidates){
+      const q=shuffleQuestion(q0);
+      const key=normQ(q.question);
+      if(used.has(key)) continue;
+
+      let score=0;
+      for(const old of recent) score += optionSimilarity(q,old)*10;
+      // Penalize nearly identical wording as well.
+      for(const old of recent){
+        const a=key, b=normQ(old.question);
+        if(a===b) score+=1000;
+        else{
+          const aw=a.split(' '), bw=new Set(b.split(' '));
+          let common=0;
+          aw.forEach(w=>{if(w.length>2 && bw.has(w)) common++;});
+          if(common>=Math.min(5,aw.length)) score+=common;
+        }
+      }
+
+      // Small random component prevents deterministic repetition.
+      score += Math.random()*3;
+      if(score<bestScore){
+        bestScore=score;
+        best=q;
+      }
+    }
+
+    if(!best){
+      const fresh=candidates.find(q=>!used.has(normQ(q.question)))||candidates[0];
+      best=shuffleQuestion(fresh);
+    }
+
+    generatedOptionHistory.push(best);
+    if(generatedOptionHistory.length>20) generatedOptionHistory.shift();
+    return best;
+  }
+
+  /* ================= screens ================= */
+  function showScreen(id){
+    ['screen-home','screen-mode','screen-count','screen-lobby','screen-loading','screen-question','screen-reveal','screen-end'].forEach(s=>{
+      $(s).classList.toggle('hidden', s!==id);
+    });
+    $('btn-home').classList.toggle('hidden', id==='screen-home');
+  }
+
+  $('btn-home').onclick = ()=>{ hardReset(); };
+  function hardReset(){
+    generatedOptionHistory=[];
+    stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; localAnswerRound=-1; localAnswerChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
+    selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
+    $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
+    showScreen('screen-home');
+  }
+
+  /* ---------- mode grid builder (shared by solo + lobby) ---------- */
+  function buildModeGrid(container, opts){
+    container.innerHTML='';
+    const { selectedId, playerCount, onSelect } = opts;
+    MODES.forEach(m=>{
+      const disabled = m.duoOnly && playerCount!==2;
+      const card = document.createElement('div');
+      card.className = 'modecard' + (m.id===selectedId?' selected':'') + (disabled?' disabled':'');
+      card.innerHTML = `<span class="micon">${m.icon}</span><span class="mlabel">${m.label}</span>${m.duoOnly?'<span class="mnote">শুধু ২ জনের জন্য</span>':''}`;
+      if(!disabled) card.onclick = ()=> onSelect(m.id);
+      container.appendChild(card);
+    });
+  }
+  function buildCountRow(container, opts){
+    container.innerHTML='';
+    const { selectedVal, onSelect } = opts;
+    [10,20,30,'inf'].forEach(v=>{
+      const b = document.createElement('div');
+      b.className = 'countbtn' + (selectedVal===v?' selected':'');
+      b.innerHTML = v==='inf' ? `∞<small>না বলা পর্যন্ত</small>` : `${v}<small>প্রশ্ন</small>`;
+      b.onclick = ()=> onSelect(v);
+      container.appendChild(b);
+    });
+  }
+
+  // Guaranteed-unused local safety net. Used only if the normal generator
+  // cannot produce another question.
+  function makeEmergencyQuestion(mode, usedList){
+    const used=new Set((usedList||[]).map(normQ));
+    const templates={
+      funny:()=>{ const a=pick(['রোবট','বিড়াল','এলিয়েন','মশা','পেঙ্গুইন']); return {
+        question:`যদি ${a} তোমার শিক্ষক হতো, প্রথমে কী করতে পারে?`,
+        options:['অদ্ভুত নিয়ম বানাতে পারে','সূর্য বন্ধ করতে পারে','সমুদ্র সরাতে পারে','চাঁদ লুকাতে পারে'],correctIndex:0}; },
+      angry:()=>({question:`রাগী প্রশ্ন: ${pick([5,7,9,11])} এর সঙ্গে ১ যোগ করলে কত?`,options:['৬','৮','১০','১২'],correctIndex:0}),
+      baby:()=>({question:`সহজ প্রশ্ন: ২ + ${pick([1,2,3])} = কত?`,options:['২','৩','৪','৫'],correctIndex:0}),
+      iq:()=>{const a=pick([3,4,5,6,7]),b=pick([2,3,4]);const ans=a+b;return {question:`${a}টি বলের সঙ্গে আরও ${b}টি যোগ করলে মোট কত?`,options:[String(ans),String(ans+1),String(ans+2),String(a)],correctIndex:0};},
+      hardcore:()=>{const a=pick([7,9,11,13,15]),b=pick([4,5,6]);const ans=a*b;return {question:`${a} × ${b} = কত?`,options:[String(ans),String(ans+b),String(ans-b),String(a+b)],correctIndex:0};},
+      puzzle:()=>({question:`কোন জিনিসটি যত বেশি নাও, তত বেশি রেখে যাও?`,options:['পদচিহ্ন','ছায়া','বাতাস','আলো'],correctIndex:0}),
+      age:()=>({question:`কোনো বড় সিদ্ধান্তের আগে কী করা সবচেয়ে পরিণত কাজ?`,options:['তথ্য যাচাই ও সময় নিয়ে ভাবা','তাড়াহুড়া করে সিদ্ধান্ত নেওয়া','অন্যকে দোষ দেওয়া','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,ageWeights:[10,3,2,1]}),
+      love:()=>({question:`সম্পর্কে মতভেদ হলে কোন আচরণটি সবচেয়ে স্বাস্থ্যকর?`,options:['শান্তভাবে কথা বলা','চুপ করে শাস্তি দেওয়া','অপমান করা','বিষয়টি এড়িয়ে যাওয়া'],correctIndex:null,loveWeights:[10,3,1,2]})
+    };
+    function pick(a){ return a[Math.floor(Math.random()*a.length)]; }
+    for(let i=0;i<500;i++){
+      const q=(templates[mode]||templates.iq)();
+      q.question += ` • ${i+1}`;
+      if(!used.has(normQ(q.question))) return shuffleQuestion(q);
+    }
+    return null;
   }
 
   /* ================= SOLO FLOW ================= */
@@ -916,7 +1118,11 @@ async function apiGenerateQuestion(mode, usedList){
   };
   function renderModeScreen(){
     buildModeGrid($('mode-grid'), { selectedId:selectedMode, playerCount: soloMode?1:0, onSelect:(id)=>{
-      selectedMode=id; renderModeScreen(); $('btn-mode-next').disabled=false;
+      selectedMode=id;
+      // Start AI generation immediately while the player chooses question count.
+      prefetchTowerAI(id, []);
+      renderModeScreen();
+      $('btn-mode-next').disabled=false;
     }});
   }
   $('btn-mode-next').onclick = ()=>{
@@ -925,7 +1131,11 @@ async function apiGenerateQuestion(mode, usedList){
   };
   function renderCountScreen(){
     buildCountRow($('count-row'), { selectedVal:selectedCount, onSelect:(v)=>{
-      selectedCount=v; renderCountScreen(); $('btn-count-next').disabled=false;
+      selectedCount=v;
+      // Keep the first AI batch generating while the player is on this screen.
+      if(selectedMode) prefetchTowerAI(selectedMode, []);
+      renderCountScreen();
+      $('btn-count-next').disabled=false;
     }});
   }
   $('solo-timer-toggle').onchange = e=>{ soloTimerEnabled = !!e.target.checked; };
@@ -968,6 +1178,9 @@ async function apiGenerateQuestion(mode, usedList){
     hintShown=false; localAnsweredThisRound=false; $('btn-hint').disabled=false; $('hint-text').classList.add('hidden');
     showScreen('screen-question');
     renderSoloQuestion();
+    // Generate the next batch while the player is answering this question.
+    prefetchTowerAI(soloState.mode, soloState.used || []);
+
     if(soloState.timerEnabled) startSoloTimer(); else updateTimerBar(false);
   }
 
@@ -1061,6 +1274,21 @@ async function apiGenerateQuestion(mode, usedList){
       const done = soloState.stop || (soloState.total!=='inf' && soloState.round>=soloState.total);
       if(done){ showSoloEnd(); } else { await soloNextQuestion(); }
     }, REVEAL_MS);
+  }
+
+  function launchConfetti(){
+    const pieces = 28;
+    for(let i=0;i<pieces;i++){
+      const el=document.createElement('div');
+      el.className='confetti';
+      el.textContent='✦';
+      el.style.left=(Math.random()*100)+'vw';
+      el.style.animationDuration=(1.8+Math.random()*2.2)+'s';
+      el.style.animationDelay=(Math.random()*0.35)+'s';
+      el.style.fontSize=(7+Math.random()*7)+'px';
+      document.body.appendChild(el);
+      setTimeout(()=>el.remove(), 4500);
+    }
   }
 
   function showSoloEnd(){
@@ -1224,6 +1452,8 @@ async function apiGenerateQuestion(mode, usedList){
         playerCount:players.length,
         onSelect:id=>{
           lobbySelectedMode=id;
+          // Generate the first AI batch while players are still in the lobby.
+          prefetchTowerAI(id, room && room.usedQuestions ? room.usedQuestions : []);
           renderLobby();
         }
       });
@@ -1231,6 +1461,10 @@ async function apiGenerateQuestion(mode, usedList){
         selectedVal:lobbySelectedCount,
         onSelect:v=>{
           lobbySelectedCount=v;
+          if(lobbySelectedMode) prefetchTowerAI(
+            lobbySelectedMode,
+            room && room.usedQuestions ? room.usedQuestions : []
+          );
           renderLobby();
         }
       });
@@ -1242,6 +1476,13 @@ async function apiGenerateQuestion(mode, usedList){
   async function createRoom(){
     const name=($('input-name').value||'').trim();
     if(!name){ $('home-error').textContent=TXT.err_name; return; }
+
+    $('home-error').textContent='Firebase সংযোগ পরীক্ষা করা হচ্ছে…';
+    const firebaseReady = await firebaseReadyPromise;
+    if(!firebaseReady){
+      $('home-error').textContent='Firebase সংযোগ পাওয়া যায়নি। Firebase Database চালু আছে এবং Rules-এ read/write অনুমতি আছে কি না পরীক্ষা করো।';
+      return;
+    }
 
     const code=genCode();
     playerId=genId();
@@ -1288,6 +1529,13 @@ async function apiGenerateQuestion(mode, usedList){
     const code=($('input-code').value||'').trim().toUpperCase();
     if(!name){$('home-error').textContent=TXT.err_name;return;}
     if(code.length!==4){$('home-error').textContent=TXT.err_code;return;}
+
+    $('home-error').textContent='Firebase সংযোগ পরীক্ষা করা হচ্ছে…';
+    const firebaseReady = await firebaseReadyPromise;
+    if(!firebaseReady){
+      $('home-error').textContent='Firebase সংযোগ পাওয়া যায়নি। Firebase Database চালু আছে এবং Rules-এ read/write অনুমতি আছে কি না পরীক্ষা করো।';
+      return;
+    }
 
     try{
       const found=await firebaseFetch(roomUrl(code),{method:'GET'});
@@ -1370,6 +1618,9 @@ async function apiGenerateQuestion(mode, usedList){
       showScreen('screen-question');
       renderMultiplayerQuestion();
       startMultiplayerTimers();
+
+      // Prepare future questions while players answer this one.
+      prefetchTowerAI(room.mode, room.usedQuestions || []);
     }catch(e){
       console.error('start game failed',e);
       showScreen('screen-lobby');
