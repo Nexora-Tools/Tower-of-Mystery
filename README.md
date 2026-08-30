@@ -1,6 +1,6 @@
 🌐 [Website](https://nexora-tools.github.io/Mystery-of-Tower/)
 
-# 🏰 Tower Mystery
+# 🏰 Tower OF Mystery
 
 ### Enter the tower. Answer the questions. Reach the top.
 
