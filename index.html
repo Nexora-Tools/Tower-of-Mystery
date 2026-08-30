@@ -762,29 +762,102 @@
     return shuffleQuestion(pick(out));
   }
 
+  // Tracks recent option sets so consecutive rounds don't keep showing
+  // the same four choices even when the question family is similar.
+  let generatedOptionHistory=[];
+
+  function optionSignature(q){
+    return (q.options||[]).map(x=>normQ(x)).sort().join('|');
+  }
+
+  function optionSimilarity(a,b){
+    const A=new Set((a.options||[]).map(x=>normQ(x)));
+    const B=new Set((b.options||[]).map(x=>normQ(x)));
+    let same=0; A.forEach(x=>{if(B.has(x)) same++;});
+    return same;
+  }
+
   async function apiGenerateQuestion(mode, usedList){
-    const usedNorm=usedList.map(normQ);
+    const used=new Set((usedList||[]).map(normQ));
     const candidates=[];
-    const seen=new Set(usedNorm);
-    for(let i=0;i<120;i++){
-      const q=makeVariantQuestion(mode, usedNorm);
-      if(q && !seen.has(normQ(q.question)) && !candidates.some(x=>normQ(x.question)===normQ(q.question))){
+    const candidateKeys=new Set(used);
+
+    // Ask the existing local generator for many independent candidates.
+    // Passing the growing candidate list prevents it from returning the
+    // same question repeatedly during this collection phase.
+    for(let i=0;i<320;i++){
+      try{
+        const q=makeVariantQuestion(mode,[...candidateKeys]);
+        if(!q) continue;
+        const key=normQ(q.question);
+        if(candidateKeys.has(key)) continue;
+        candidateKeys.add(key);
         candidates.push(q);
-        if(candidates.length>=40) break;
-      }
+      }catch(e){}
     }
-    const base=AUTO[mode]||[];
-    for(const x of base){
-      if(!seen.has(normQ(x[0]))){
-        const q={question:x[0], options:x[1], correctIndex:null, hint:null, reveal:x[3]||null};
-        if(mode==='age') q.ageWeights=x[2];
-        else if(mode==='love') q.loveWeights=x[2];
-        else if(mode!=='angry'){ q.correctIndex=x[2]; q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।'; }
-        candidates.push(shuffleQuestion(q));
+
+    // Add every static question that has not already been used.
+    for(const x of (AUTO[mode]||[])){
+      const key=normQ(x[0]);
+      if(candidateKeys.has(key)) continue;
+      const q={
+        question:x[0],
+        options:x[1].slice(),
+        correctIndex:null,
+        hint:null,
+        reveal:x[3]||null
+      };
+      if(mode==='age') q.ageWeights=x[2];
+      else if(mode==='love') q.loveWeights=x[2];
+      else if(mode!=='angry'){
+        q.correctIndex=x[2];
+        q.hint='বিকল্পগুলো ভালো করে মিলিয়ে দেখো।';
       }
+      candidates.push(q);
+      candidateKeys.add(key);
     }
+
     if(!candidates.length) throw new Error('question-pool-exhausted');
-    return pick(candidates);
+
+    // Prefer candidates whose option set is different from the recent rounds.
+    let best=null, bestScore=Infinity;
+    const recent=generatedOptionHistory.slice(-6);
+
+    for(const q0 of candidates){
+      const q=shuffleQuestion(q0);
+      const key=normQ(q.question);
+      if(used.has(key)) continue;
+
+      let score=0;
+      for(const old of recent) score += optionSimilarity(q,old)*10;
+      // Penalize nearly identical wording as well.
+      for(const old of recent){
+        const a=key, b=normQ(old.question);
+        if(a===b) score+=1000;
+        else{
+          const aw=a.split(' '), bw=new Set(b.split(' '));
+          let common=0;
+          aw.forEach(w=>{if(w.length>2 && bw.has(w)) common++;});
+          if(common>=Math.min(5,aw.length)) score+=common;
+        }
+      }
+
+      // Small random component prevents deterministic repetition.
+      score += Math.random()*3;
+      if(score<bestScore){
+        bestScore=score;
+        best=q;
+      }
+    }
+
+    if(!best){
+      const fresh=candidates.find(q=>!used.has(normQ(q.question)))||candidates[0];
+      best=shuffleQuestion(fresh);
+    }
+
+    generatedOptionHistory.push(best);
+    if(generatedOptionHistory.length>20) generatedOptionHistory.shift();
+    return best;
   }
 
   /* ================= screens ================= */
@@ -797,6 +870,7 @@
 
   $('btn-home').onclick = ()=>{ hardReset(); };
   function hardReset(){
+    generatedOptionHistory=[];
     stopPolling(); room=null; roomCode=null; isHost=false; playerId=null; pendingChoice=null; localAnswerRound=-1; localAnswerChoice=null; lastMPRenderSignature=''; soloMode=false; soloState=null;
     selectedMode=null; selectedCount=null; soloTimerEnabled=false; lobbySelectedMode=null; lobbySelectedCount=null; lobbyTimerEnabled=false;
     $('input-name').value=''; $('input-code').value=''; $('home-error').textContent='';
@@ -1266,6 +1340,7 @@
   $('btn-join').onclick=joinRoom;
 
   async function startMultiplayerGame(){
+    generatedOptionHistory=[];
     if(!isHost || !room || gameStarting) return;
     if(!lobbySelectedMode || !lobbySelectedCount) return;
 
