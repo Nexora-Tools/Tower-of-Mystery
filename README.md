@@ -1,4 +1,4 @@
-🌐 [Website](https://nexora-tools.github.io/Mystery-of-Tower/)
+🌐 [Website](https://nexora-tools.github.io/Tower-of-Mystery/)
 
 # 🏰 Tower OF Mystery
 
